@@ -1,0 +1,12 @@
+{% if result %}
+  <p><strong>GBP {{ result.per_mw|floatformat:0 }}/MW/yr</strong> &mdash; GBP {{ result.total_revenue|floatformat:0 }} total over {{ result.n_days }} day{{ result.n_days|pluralize }}</p>
+  {{ result.chart_html|safe }}
+
+  <h2>Dispatch &mdash; day {{ result.inspect_day }}</h2>
+  <p>How the optimizer actually got there: state of charge, the headroom/footroom it had to work with, charge and discharge power, reserve capacity by market, and the prices driving each decision.</p>
+  {{ result.dispatch_chart_html|safe }}
+{% elif errors %}
+  <p>Check the form: {{ errors }}</p>
+{% else %}
+  <p>Adjust the form above to run a backtest.</p>
+{% endif %}

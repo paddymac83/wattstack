@@ -1,0 +1,25 @@
+[project]
+name = "wattstack-core"
+version = "0.1.0"
+description = "GB battery revenue-stacking: battery model, market rules, optimizer, and backtest engine."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "pulp>=2.8,<4.0",  # 4.0 renames LpVariable.dicts / PULP_CBC_CMD -- revisit in ADR 0002 when it lands
+    "click>=8.1",
+]
+
+[project.scripts]
+wattstack = "wattstack_core.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "plotly>=5.20"]
+plotting = ["plotly>=5.20"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wattstack_core"]

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>wattstack</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; }
+    legend { padding: 0 0.5rem; font-weight: 600; }
+    label { display: block; margin-bottom: 0.9rem; font-size: 14px; }
+    label span { display: block; color: #555; margin-bottom: 0.25rem; }
+    input[type="number"] { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+    .checks label { display: inline-block; margin-right: 1.25rem; font-weight: normal; }
+    #results { margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <h1>wattstack</h1>
+  <p>GB battery revenue-stacking backtest &mdash; running locally, on synthetic prices until real Elexon/NESO ingestion is wired up.</p>
+
+  <form hx-post="{% url 'recompute' %}" hx-target="#results" hx-trigger="change" hx-swap="innerHTML">
+    {% csrf_token %}
+    <fieldset>
+      <legend>Battery</legend>
+      <label><span>Power (MW)</span>{{ form.power_mw }}</label>
+      <label><span>Duration (hours)</span>{{ form.duration_hours }}</label>
+      <label><span>Round-trip efficiency</span>{{ form.round_trip_efficiency }}</label>
+      <label><span>Days to backtest</span>{{ form.days }}</label>
+      <label><span>Day to inspect (dispatch chart)</span>{{ form.inspect_day }}</label>
+    </fieldset>
+    <fieldset class="checks">
+      <legend>Markets included</legend>
+      {{ form.markets }}
+    </fieldset>
+  </form>
+
+  <div id="results" hx-post="{% url 'recompute' %}" hx-trigger="load" hx-include="form"></div>
+</body>
+</html>

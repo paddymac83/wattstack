@@ -1,0 +1,9 @@
+{
+  "folders": [
+    { "name": "wattstack (root)", "path": "." },
+    { "name": "core", "path": "core" },
+    { "name": "web", "path": "web" },
+    { "name": "ingestion", "path": "ingestion" }
+  ],
+  "settings": {}
+}
