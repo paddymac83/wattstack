@@ -21,8 +21,8 @@ class DispatchResult:
     # alongside the result so downstream consumers (plotting, in
     # particular) don't need a PriceProvider or risk recomputing
     # something different from what the optimizer actually saw.
-    energy_price: list[float] = field(default_factory=list)
-    response_price: dict[Market, list[float]] = field(default_factory=dict)
+    wholesale_price: list[float] = field(default_factory=list)
+    reserve_price: dict[Market, list[float]] = field(default_factory=dict)
 
     @property
     def total_revenue(self) -> float:

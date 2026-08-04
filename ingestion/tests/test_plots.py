@@ -3,11 +3,13 @@ themselves, with zero dependency on either real API."""
 from datetime import datetime, timedelta
 
 from wattstack_ingestion.plots import (
+    grouped_bar_chart,
     overlay_two_series,
     price_by_hour_of_day,
     price_by_weekday,
     price_distribution,
     price_timeseries,
+    stacked_bar_chart,
 )
 
 
@@ -48,3 +50,39 @@ def test_overlay_two_series_has_two_named_traces():
     fig = overlay_two_series(ts, vals, [v * 0.5 for v in vals], "Wholesale", "DC", "Test", "GBP")
     names = {t.name for t in fig.data}
     assert names == {"Wholesale", "DC"}
+
+
+def test_grouped_bar_chart_has_one_trace_per_series():
+    fig = grouped_bar_chart(
+        categories=["0 to 20", "20 to 40"],
+        series={"Long": [3, 5], "Short": [1, 2]},
+        title="Test", x_label="Bin", y_label="Count",
+    )
+    names = {t.name for t in fig.data}
+    assert names == {"Long", "Short"}
+
+
+def test_grouped_bar_chart_preserves_category_order():
+    fig = grouped_bar_chart(
+        categories=["a", "b", "c"],
+        series={"only": [1, 2, 3]},
+        title="Test", x_label="X", y_label="Y",
+    )
+    assert list(fig.data[0].x) == ["a", "b", "c"]
+
+
+def test_stacked_bar_chart_has_one_trace_per_series():
+    fig = stacked_bar_chart(
+        categories=["2026-06-01", "2026-06-02"],
+        series={"Gas": [10, 20], "Wind": [5, 8], "BSAA": [1, 2]},
+        title="Test", x_label="Day", y_label="MWh",
+    )
+    names = {t.name for t in fig.data}
+    assert names == {"Gas", "Wind", "BSAA"}
+
+
+def test_stacked_bar_chart_uses_stack_barmode():
+    fig = stacked_bar_chart(
+        categories=["a"], series={"x": [1]}, title="Test", x_label="X", y_label="Y",
+    )
+    assert fig.layout.barmode == "stack"

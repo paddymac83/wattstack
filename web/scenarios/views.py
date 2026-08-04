@@ -11,7 +11,7 @@ from django.shortcuts import render
 
 from wattstack_core.backtest import run_backtest
 from wattstack_core.battery import BatterySpec
-from wattstack_core.markets import Market
+from wattstack_core.markets import Market, market_display_name
 from wattstack_core.scenario import BacktestWindow, Scenario
 
 from .forms import ScenarioForm
@@ -19,7 +19,9 @@ from .models import BacktestRunRecord, ScenarioRecord
 
 
 def index(request):
-    form = ScenarioForm(initial={"markets": [Market.ENERGY.value, Market.DYNAMIC_CONTAINMENT.value]})
+    form = ScenarioForm(
+        initial={"markets": [Market.WHOLESALE.value, Market.DYNAMIC_CONTAINMENT_LOW.value, Market.DYNAMIC_CONTAINMENT_HIGH.value]}
+    )
     return render(request, "scenarios/run.html", {"form": form})
 
 
@@ -80,7 +82,7 @@ def _revenue_stack_chart(result, power_mw: float) -> str:
     labels, values = [], []
     for market, value in result.revenue_by_market.items():
         if value:
-            labels.append(market.value.replace("_", " ").title())
+            labels.append(market_display_name(market))
             values.append(round(value / n_days * 365 / power_mw))
 
     if not values:

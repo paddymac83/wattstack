@@ -8,11 +8,11 @@ Headroom and footroom, as plotted here, are derived purely from the
 SOC trajectory and the battery's bounds:
   headroom_mwh[t] = soc_mwh[t]        - soc_min_mwh   (room to discharge further)
   footroom_mwh[t] = soc_max_mwh       - soc_mwh[t]     (room to charge further)
-These are distinct from the "headroom" constraint expression inside
-optimizer.py, which is the energy a *committed* response product
-needs held back to be deliverable -- see docs/adr/0002. The two are
-related (the constraint is what keeps headroom from going negative)
-but are not the same quantity.
+These are distinct from the headroom/footroom constraint expressions
+inside optimizer.py, which are the energy a *committed* reserve
+product needs held back to be deliverable -- see docs/adr/0002 and
+markets.py. The two are related (the constraints are what keep
+headroom/footroom from going negative) but are not the same quantity.
 
 Needs plotly, which core does NOT depend on by default -- install
 `wattstack-core[plotting]` to use this module. Kept separate so a
@@ -21,7 +21,7 @@ plain backtest/CLI install stays lightweight.
 from __future__ import annotations
 
 from wattstack_core.battery import BatterySpec
-from wattstack_core.markets import RESPONSE_MARKETS
+from wattstack_core.markets import MARKET_REGISTRY, market_display_name
 from wattstack_core.prices import PERIODS_PER_DAY
 from wattstack_core.results import DispatchResult
 
@@ -34,10 +34,14 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 _MARKET_COLORS = {
-    "dynamic_containment": "#eb6834",
-    "dynamic_regulation": "#1baf7a",
-    "dynamic_moderation": "#eda100",
+    "dynamic_containment_high": "#eb6834",
+    "dynamic_containment_low": "#1baf7a",
+    "bm_offer": "#eda100",
+    "bm_bid": "#7b61ff",
 }
+
+
+_SETTLEMENT_UNIT_LABELS = {"per_mwh": "GBP/MWh", "per_mw_h": "GBP/MW/h"}
 
 
 def _period_labels() -> list[str]:
@@ -50,19 +54,20 @@ def dispatch_figure(result: DispatchResult, battery: BatterySpec) -> "go.Figure"
     Panels, top to bottom, all sharing a time-of-day x-axis:
       1. State of charge, with the battery's usable min/max bounds
       2. Headroom and footroom -- the two quantities that actually
-         limit how much response capacity can be committed
+         limit how much reserve capacity can be committed, in either
+         direction
       3. Charge / discharge power
-      4. Reserve capacity committed, by response market
+      4. Reserve capacity committed, by market
       5. Prices that drove the decision (only if the result carries
-         them -- see results.DispatchResult.energy_price)
+         them -- see results.DispatchResult.wholesale_price)
     """
     x = _period_labels()
-    active_response = [m for m in RESPONSE_MARKETS if m in result.reserve_mw]
+    active_reserve = [m for m in MARKET_REGISTRY if m in result.reserve_mw]
 
     headroom = [round(soc - battery.soc_min_mwh, 4) for soc in result.soc_mwh]
     footroom = [round(battery.soc_max_mwh - soc, 4) for soc in result.soc_mwh]
 
-    has_prices = bool(result.energy_price) or bool(result.response_price)
+    has_prices = bool(result.wholesale_price) or bool(result.reserve_price)
     row_titles = [
         "State of charge (MWh)",
         "Headroom & footroom (MWh)",
@@ -105,12 +110,12 @@ def dispatch_figure(result: DispatchResult, battery: BatterySpec) -> "go.Figure"
     )
 
     # Panel 4: reserve capacity by market, stacked
-    for m in active_response:
+    for m in active_reserve:
         fig.add_trace(
             go.Scatter(
                 x=x,
                 y=result.reserve_mw[m],
-                name=m.value.replace("_", " ").title(),
+                name=market_display_name(m),
                 stackgroup="reserve",
                 line=dict(width=0.5, color=_MARKET_COLORS.get(m.value, "#898781")),
             ),
@@ -120,20 +125,21 @@ def dispatch_figure(result: DispatchResult, battery: BatterySpec) -> "go.Figure"
 
     # Panel 5: prices, if the result carries them
     if has_prices:
-        if result.energy_price:
+        if result.wholesale_price:
             fig.add_trace(
                 go.Scatter(
-                    x=x, y=result.energy_price, name="Energy price (GBP/MWh)", line=dict(color="#2a78d6")
+                    x=x, y=result.wholesale_price, name="Wholesale price (GBP/MWh)", line=dict(color="#2a78d6")
                 ),
                 row=5,
                 col=1,
             )
-        for m, series in result.response_price.items():
+        for m, series in result.reserve_price.items():
+            unit = _SETTLEMENT_UNIT_LABELS[MARKET_REGISTRY[m].settlement_unit]
             fig.add_trace(
                 go.Scatter(
                     x=x,
                     y=series,
-                    name=f"{m.value.replace('_', ' ').title()} price (GBP/MW/h)",
+                    name=f"{market_display_name(m)} price ({unit})",
                     line=dict(color=_MARKET_COLORS.get(m.value, "#898781"), dash="dot"),
                 ),
                 row=5,

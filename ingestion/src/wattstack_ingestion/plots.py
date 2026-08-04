@@ -86,3 +86,56 @@ def overlay_two_series(
     fig.add_trace(go.Scatter(x=timestamps, y=values_b, name=name_b, line=dict(color="#eb6834")))
     fig.update_layout(title=title, yaxis_title=y_label, margin=dict(l=60, r=20, t=50, b=40), legend=dict(orientation="h", y=1.1))
     return fig
+
+
+def grouped_bar_chart(
+    categories: list[str],
+    series: dict[str, list[float]],
+    title: str,
+    x_label: str,
+    y_label: str,
+) -> go.Figure:
+    """A bar chart with one set of bars per category, grouped side by
+    side per named series -- e.g. count of settlement periods per
+    GBP20/MWh price bin, one bar for Long and one for Short at each
+    bin. Generic on purpose: useful well beyond this one chart."""
+    colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+    fig = go.Figure()
+    for i, (name, values) in enumerate(series.items()):
+        fig.add_trace(go.Bar(x=categories, y=values, name=name, marker_color=colors[i % len(colors)]))
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        barmode="group",
+        margin=dict(l=60, r=20, t=50, b=90),
+        legend=dict(orientation="h", y=1.1),
+    )
+    fig.update_xaxes(tickangle=-45)
+    return fig
+
+
+def stacked_bar_chart(
+    categories: list[str],
+    series: dict[str, list[float]],
+    title: str,
+    x_label: str,
+    y_label: str,
+) -> go.Figure:
+    """A stacked bar chart -- one bar per category (x-axis), each
+    built from segments in `series` -- e.g. daily accepted offer
+    volume, stacked by fuel type including BSAA as its own segment."""
+    colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#898781", "#e87ba4", "#7b61ff"]
+    fig = go.Figure()
+    for i, (name, values) in enumerate(series.items()):
+        fig.add_trace(go.Bar(x=categories, y=values, name=name, marker_color=colors[i % len(colors)]))
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        barmode="stack",
+        margin=dict(l=60, r=20, t=50, b=90),
+        legend=dict(orientation="h", y=1.1),
+    )
+    fig.update_xaxes(tickangle=-45)
+    return fig

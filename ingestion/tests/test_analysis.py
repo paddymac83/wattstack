@@ -1,6 +1,13 @@
 from wattstack_ingestion.analysis import (
+    aggregate_volume_by_day_and_category,
+    bid_volume,
+    bin_counts_by_group,
+    classify_system_length,
     filter_battery_bmu_ids,
+    filter_bmus_by_id_pattern,
+    fuel_type_lookup,
     marginal_bid_share,
+    offer_volume,
     price_lookup_by_bmu_period,
 )
 
@@ -26,6 +33,38 @@ def test_filter_battery_bmu_ids_excludes_non_matching():
 def test_filter_battery_bmu_ids_supports_multiple_labels():
     ids = filter_battery_bmu_ids(BMUNITS, id_field="bmuId", label_field="fuelType", battery_labels={"battery", "wind"})
     assert ids == {"T_BATT-1", "T_BATT-2", "T_WIND-1"}
+
+
+# --- filter_bmus_by_id_pattern ---
+
+
+def test_filter_bmus_by_id_pattern_matches_regex_against_id():
+    bmunits = [{"bmuId": "T_KILSB-2"}, {"bmuId": "T_WIND-1"}]
+    matched = filter_bmus_by_id_pattern(bmunits, id_field="bmuId", pattern=r"B-\d+$")
+    assert matched == {"T_KILSB-2"}
+
+
+def test_filter_bmus_by_id_pattern_demonstrates_the_real_false_positive_risk():
+    """A plausible-looking 'ends in B-<number>' pattern also matches
+    real, well-known non-battery GB power stations whose names end
+    in B for unrelated reasons -- exactly why this function takes an
+    arbitrary pattern rather than shipping a trusted default."""
+    bmunits = [{"bmuId": "T_KILSB-2"}, {"bmuId": "T_DUNGB-1"}, {"bmuId": "T_HPB-3"}]
+    matched = filter_bmus_by_id_pattern(bmunits, id_field="bmuId", pattern=r"B-\d+$")
+    # all three match the naive pattern -- only the first is actually a battery
+    assert matched == {"T_KILSB-2", "T_DUNGB-1", "T_HPB-3"}
+
+
+def test_filter_bmus_by_id_pattern_skips_rows_without_an_id():
+    bmunits = [{"notAnId": "x"}]
+    matched = filter_bmus_by_id_pattern(bmunits, id_field="bmuId", pattern=r".*")
+    assert matched == set()
+
+
+def test_filter_bmus_by_id_pattern_returns_empty_set_when_nothing_matches():
+    bmunits = [{"bmuId": "T_WIND-1"}]
+    matched = filter_bmus_by_id_pattern(bmunits, id_field="bmuId", pattern=r"ZZZ")
+    assert matched == set()
 
 
 # --- price_lookup_by_bmu_period: built from BOD (submitted prices), not BOALF ---
@@ -123,3 +162,123 @@ def test_marginal_bid_share_handles_empty_price_lookup():
         period_field="settlementPeriod", bmu_id_field="bmUnit",
     )
     assert result["n_periods"] == 0  # every period excluded -- no prices known at all
+
+
+# --- classify_system_length ---
+
+
+def test_classify_system_length_positive_niv_is_short():
+    assert classify_system_length(150.0) == "Short"
+
+
+def test_classify_system_length_negative_niv_is_long():
+    assert classify_system_length(-150.0) == "Long"
+
+
+def test_classify_system_length_zero_niv_is_short_by_tiebreak():
+    assert classify_system_length(0.0) == "Short"
+
+
+# --- bin_counts_by_group ---
+
+
+def test_bin_counts_by_group_bins_and_counts_correctly():
+    values = [5.0, 15.0, 25.0, 35.0]  # bins of width 20: [0,20), [20,40)
+    groups = ["Short", "Short", "Long", "Long"]
+    result = bin_counts_by_group(values, groups, bin_width=20.0)
+    assert result["bin_labels"] == ["0 to 20", "20 to 40"]
+    assert result["counts"]["Short"] == [2, 0]
+    assert result["counts"]["Long"] == [0, 2]
+
+
+def test_bin_counts_by_group_handles_negative_values():
+    values = [-15.0, 5.0]
+    groups = ["Long", "Short"]
+    result = bin_counts_by_group(values, groups, bin_width=20.0)
+    assert result["bin_labels"] == ["-20 to 0", "0 to 20"]
+    assert result["counts"]["Long"] == [1, 0]
+    assert result["counts"]["Short"] == [0, 1]
+
+
+def test_bin_counts_by_group_clamps_value_exactly_at_max_into_last_bin():
+    values = [0.0, 20.0]  # 20.0 is exactly the upper edge
+    groups = ["Short", "Short"]
+    result = bin_counts_by_group(values, groups, bin_width=20.0)
+    assert result["bin_labels"] == ["0 to 20"]
+    assert result["counts"]["Short"] == [2]
+
+
+def test_bin_counts_by_group_handles_empty_input():
+    result = bin_counts_by_group([], [], bin_width=20.0)
+    assert result["bin_labels"] == []
+    assert result["counts"] == {}
+
+
+# --- offer_volume / bid_volume ---
+
+
+def test_offer_volume_is_positive_delta():
+    assert offer_volume(level_from=100.0, level_to=150.0) == 50.0
+
+
+def test_offer_volume_is_zero_for_a_decrease():
+    assert offer_volume(level_from=150.0, level_to=100.0) == 0.0
+
+
+def test_bid_volume_is_positive_for_a_decrease():
+    assert bid_volume(level_from=150.0, level_to=100.0) == 50.0
+
+
+def test_bid_volume_is_zero_for_an_increase():
+    assert bid_volume(level_from=100.0, level_to=150.0) == 0.0
+
+
+# --- fuel_type_lookup ---
+
+
+def test_fuel_type_lookup_maps_every_unit():
+    bmunits = [{"bmuId": "T_GAS-1", "fuelType": "CCGT"}, {"bmuId": "T_WIND-1", "fuelType": "WIND"}]
+    lookup = fuel_type_lookup(bmunits, id_field="bmuId", fuel_type_field="fuelType")
+    assert lookup == {"T_GAS-1": "CCGT", "T_WIND-1": "WIND"}
+
+
+def test_fuel_type_lookup_defaults_missing_fuel_type_to_unknown():
+    bmunits = [{"bmuId": "T_X-1"}]
+    lookup = fuel_type_lookup(bmunits, id_field="bmuId", fuel_type_field="fuelType")
+    assert lookup["T_X-1"] == "Unknown"
+
+
+def test_fuel_type_lookup_skips_rows_without_an_id():
+    bmunits = [{"fuelType": "WIND"}]
+    lookup = fuel_type_lookup(bmunits, id_field="bmuId", fuel_type_field="fuelType")
+    assert lookup == {}
+
+
+# --- aggregate_volume_by_day_and_category ---
+
+
+def test_aggregate_volume_sums_matching_day_and_category():
+    rows = [
+        {"day": "2026-06-01", "cat": "Gas", "vol": 10.0},
+        {"day": "2026-06-01", "cat": "Gas", "vol": 5.0},
+        {"day": "2026-06-01", "cat": "Wind", "vol": 3.0},
+        {"day": "2026-06-02", "cat": "Gas", "vol": 7.0},
+    ]
+    result = aggregate_volume_by_day_and_category(rows, date_field="day", category_field="cat", volume_field="vol")
+    assert result["dates"] == ["2026-06-01", "2026-06-02"]
+    assert result["categories"] == ["Gas", "Wind"]
+    assert result["volumes"]["Gas"] == [15.0, 7.0]
+    assert result["volumes"]["Wind"] == [3.0, 0.0]  # zero-filled for the day it has no volume
+
+
+def test_aggregate_volume_skips_rows_missing_day_or_category():
+    rows = [{"day": None, "cat": "Gas", "vol": 10.0}, {"day": "2026-06-01", "cat": "Gas", "vol": 5.0}]
+    result = aggregate_volume_by_day_and_category(rows, date_field="day", category_field="cat", volume_field="vol")
+    assert result["dates"] == ["2026-06-01"]
+    assert result["volumes"]["Gas"] == [5.0]
+
+
+def test_aggregate_volume_treats_missing_volume_as_zero():
+    rows = [{"day": "2026-06-01", "cat": "Gas"}]
+    result = aggregate_volume_by_day_and_category(rows, date_field="day", category_field="cat", volume_field="vol")
+    assert result["volumes"]["Gas"] == [0.0]

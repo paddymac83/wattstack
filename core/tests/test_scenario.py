@@ -10,7 +10,7 @@ def make_scenario(**overrides):
     data = dict(
         name="test",
         battery=dict(power_mw=5, duration_hours=2),
-        markets=[Market.ENERGY],
+        markets=[Market.WHOLESALE],
         backtest=dict(start=date(2025, 1, 1), end=date(2025, 1, 2)),
     )
     data.update(overrides)

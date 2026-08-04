@@ -1,10 +1,8 @@
 from django import forms
 
-from wattstack_core.markets import Market
+from wattstack_core.markets import Market, market_display_name
 
-MARKET_CHOICES = [
-    (m.value, m.name.replace("_", " ").title()) for m in Market if m != Market.CAPACITY_MARKET
-]
+MARKET_CHOICES = [(m.value, market_display_name(m)) for m in Market if m != Market.CAPACITY_MARKET]
 
 
 class ScenarioForm(forms.Form):
@@ -14,7 +12,7 @@ class ScenarioForm(forms.Form):
     markets = forms.MultipleChoiceField(
         choices=MARKET_CHOICES,
         widget=forms.CheckboxSelectMultiple,
-        initial=[Market.ENERGY.value, Market.DYNAMIC_CONTAINMENT.value],
+        initial=[Market.WHOLESALE.value, Market.DYNAMIC_CONTAINMENT_LOW.value, Market.DYNAMIC_CONTAINMENT_HIGH.value],
     )
     days = forms.IntegerField(min_value=1, max_value=30, initial=7, label="Days to backtest")
     inspect_day = forms.IntegerField(

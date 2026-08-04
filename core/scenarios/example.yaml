@@ -6,10 +6,11 @@ battery:
   soc_min_pct: 0.05
   soc_max_pct: 0.95
 markets:
-  - energy
-  - dynamic_containment
-  - dynamic_regulation
-  - dynamic_moderation
+  - wholesale
+  - dynamic_containment_high
+  - dynamic_containment_low
+  - bm_offer
+  - bm_bid
 backtest:
   start: 2025-01-01
   end: 2025-01-07

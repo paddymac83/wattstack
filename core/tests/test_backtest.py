@@ -10,7 +10,7 @@ def make_scenario(duration_hours=2, sweep=None):
     return Scenario(
         name="test",
         battery=BatterySpec(power_mw=5, duration_hours=duration_hours),
-        markets=[Market.ENERGY, Market.DYNAMIC_CONTAINMENT],
+        markets=[Market.WHOLESALE, Market.DYNAMIC_CONTAINMENT_LOW, Market.DYNAMIC_CONTAINMENT_HIGH],
         backtest=BacktestWindow(start=date(2025, 1, 1), end=date(2025, 1, 3)),
         sweep=sweep or {},
     )

@@ -10,7 +10,12 @@ def _():
     import pandas as pd
     from datetime import date, timedelta
 
-    from wattstack_ingestion.analysis import filter_battery_bmu_ids, marginal_bid_share, price_lookup_by_bmu_period
+    from wattstack_ingestion.analysis import (
+        filter_battery_bmu_ids,
+        filter_bmus_by_id_pattern,
+        marginal_bid_share,
+        price_lookup_by_bmu_period,
+    )
     from wattstack_ingestion.cache import Cache
     from wattstack_ingestion.elexon import ElexonClient
     from wattstack_ingestion.neso import NesoClient
@@ -21,6 +26,7 @@ def _():
         NesoClient,
         date,
         filter_battery_bmu_ids,
+        filter_bmus_by_id_pattern,
         marginal_bid_share,
         mo,
         pd,
@@ -203,14 +209,24 @@ def _(acceptances_df, bid_offer_df, bmunits_df, mo):
     ref_id_field = mo.ui.dropdown(options=list(bmunits_df.columns), label="BM unit ID field (reference)")
     label_field = mo.ui.dropdown(options=list(bmunits_df.columns), label="Fuel/technology field")
     battery_labels = mo.ui.text(value="battery", label="Battery label match (comma-separated)")
+    id_pattern = mo.ui.text(
+        value="",
+        label="Battery ID pattern (regex, optional)",
+        placeholder=r"e.g. B-\d+$ -- CHECK THE MATCHES BELOW, this risks false positives",
+    )
     mo.vstack(
         [
             mo.md("From acceptances (who/when was accepted):"),
             mo.hstack([period_field, bmu_id_field]),
             mo.md("From bid-offer data (what price was submitted):"),
             mo.hstack([bo_period_field, bo_bmu_id_field, price_field]),
-            mo.md("From BM unit reference (which units are batteries):"),
+            mo.md(
+                "From BM unit reference (which units are batteries) -- fuelType often "
+                "doesn't tag BESS at all (confirmed against live data), so an optional ID "
+                "pattern is combined with it, not used alone:"
+            ),
             mo.hstack([ref_id_field, label_field, battery_labels]),
+            id_pattern,
         ]
     )
     return (
@@ -218,6 +234,7 @@ def _(acceptances_df, bid_offer_df, bmunits_df, mo):
         bmu_id_field,
         bo_bmu_id_field,
         bo_period_field,
+        id_pattern,
         label_field,
         period_field,
         price_field,
@@ -227,35 +244,66 @@ def _(acceptances_df, bid_offer_df, bmunits_df, mo):
 
 @app.cell
 def _(
-    acceptances_df,
+    bmunits_df,
     battery_labels,
+    filter_battery_bmu_ids,
+    filter_bmus_by_id_pattern,
+    id_pattern,
+    label_field,
+    mo,
+    pd,
+    ref_id_field,
+):
+    mo.stop(not (ref_id_field.value and label_field.value), mo.md("*Pick the BM unit reference field mappings above.*"))
+
+    _labels = {label.strip() for label in battery_labels.value.split(",") if label.strip()}
+    _by_fuel_type = filter_battery_bmu_ids(
+        bmunits_df.to_dict("records"), id_field=ref_id_field.value, label_field=label_field.value,
+        battery_labels=_labels,
+    )
+    _by_id_pattern = (
+        filter_bmus_by_id_pattern(bmunits_df.to_dict("records"), id_field=ref_id_field.value, pattern=id_pattern.value)
+        if id_pattern.value
+        else set()
+    )
+    battery_ids = _by_fuel_type | _by_id_pattern
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**{len(battery_ids)} battery BM units matched** "
+                f"({len(_by_fuel_type)} by fuel-type text, {len(_by_id_pattern)} by ID pattern -- "
+                f"overlap counted once). **Check this list before trusting the chart below** -- "
+                f"an ID-pattern match in particular can include real non-battery units."
+            ),
+            mo.ui.table(
+                bmunits_df[bmunits_df[ref_id_field.value].isin(battery_ids)]
+                if battery_ids else pd.DataFrame({"note": ["No matches -- try a fuel-type label or ID pattern"]})
+            ),
+        ]
+    )
+    return (battery_ids,)
+
+
+@app.cell
+def _(
+    acceptances_df,
+    battery_ids,
     bid_offer_df,
     bmu_id_field,
-    bmunits_df,
     bo_bmu_id_field,
     bo_period_field,
-    filter_battery_bmu_ids,
-    label_field,
     marginal_bid_share,
     mo,
     period_field,
     price_field,
     price_lookup_by_bmu_period,
-    ref_id_field,
 ):
     mo.stop(
-        not all([
-            period_field.value, bmu_id_field.value, bo_period_field.value, bo_bmu_id_field.value,
-            price_field.value, ref_id_field.value, label_field.value,
-        ]),
-        mo.md("*Pick all seven field mappings above.*"),
+        not all([period_field.value, bmu_id_field.value, bo_period_field.value, bo_bmu_id_field.value, price_field.value]),
+        mo.md("*Pick all field mappings above.*"),
     )
 
-    _labels = {label.strip() for label in battery_labels.value.split(",") if label.strip()}
-    battery_ids = filter_battery_bmu_ids(
-        bmunits_df.to_dict("records"), id_field=ref_id_field.value, label_field=label_field.value,
-        battery_labels=_labels,
-    )
     price_lookup = price_lookup_by_bmu_period(
         bid_offer_df.to_dict("records"), bmu_id_field=bo_bmu_id_field.value,
         period_field=bo_period_field.value, price_field=price_field.value,

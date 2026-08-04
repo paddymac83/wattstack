@@ -125,6 +125,29 @@ def test_bid_offer_data_for_day_makes_48_requests(mock_get):
 
 
 @patch("wattstack_ingestion.elexon.requests.get")
+def test_disaggregated_bsad_uses_query_params(mock_get):
+    row = {"bmUnit": "T_BSAA-1", "settlementPeriod": 5, "volume": 12.5}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    rows = client.disaggregated_bsad(date(2026, 7, 1), 5)
+    assert rows == [row]
+    called_url = mock_get.call_args.args[0]
+    assert called_url == (
+        "https://data.elexon.co.uk/bmrs/api/v1/balancing/nonbm/disbsad/details"
+        "?settlementDate=2026-07-01&settlementPeriod=5"
+    )
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_disaggregated_bsad_for_day_makes_48_requests(mock_get):
+    mock_get.return_value = _mock_response([{"bmUnit": "T_BSAA-1"}])
+    client = ElexonClient()
+    rows = client.disaggregated_bsad_for_day(date(2026, 7, 1))
+    assert mock_get.call_count == 48
+    assert len(rows) == 48
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
 def test_bid_offer_acceptances_for_day_makes_48_requests(mock_get):
     mock_get.return_value = _mock_response([{"bmUnit": "T_BATT-1"}])
     client = ElexonClient()

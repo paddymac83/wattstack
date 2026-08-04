@@ -33,7 +33,7 @@ engineering decisions and their reasoning.
 | `core/`  | **built** | Python: `BatterySpec`, GB market definitions, the `Scenario` config model, the LP dispatch optimizer (PuLP/CBC), the multi-day backtest + sweep engine, and a `wattstack` CLI. Zero UI dependencies -- pip-installable and usable standalone. |
 | `web/`   | **built** | Django + HTMX local UI wrapping `core`. Sliders/checkboxes recompute a Plotly revenue-stack chart and a per-day dispatch chart (SOC, headroom/footroom, charge/discharge, reserve by market, prices) without a page reload. Runs from `manage.py runserver`, no separate frontend build. |
 | `docs/adr/` | ongoing | Architecture decision records. |
-| `ingestion/` | **built, Elexon shape unverified against live traffic** | Real Elexon (BMRS Insights) and NESO (CKAN data portal) clients, a local SQLite cache, generic exploratory plotting (price time series, distribution, by-hour, by-weekday, two-series overlay), a script -- `wattstack-explore` -- for reproducible batch reports, and `notebooks/explore.py`, an interactive [marimo](https://marimo.io) notebook for reshaping and iterating on a query before deciding it's worth promoting into a feature (a plain `.py` file, not `.ipynb` -- diffs like normal code). Separate from `core`/`web` on purpose: this is for *you*, to build intuition about real data before deciding what to build next, not a dependency of the app itself. **Before trusting it**: I could not reach elexon.co.uk or neso.energy from the environment this was written in, so both are researched-and-documented, not tested against live traffic -- run `wattstack-explore --verify-only` first, it fails loudly and specifically if either has drifted. NESO's live EAC results resource IDs (Nov 2023 onwards, DC/DM/DR + BR/QR/SR) are confirmed directly from NESO's own results page -- but the exact price/volume field names inside that resource still aren't confirmed; `verify_schema()` and the notebook's schema-preview cells will show you the real ones.
+| `ingestion/` | **built, Elexon shape unverified against live traffic** | Real Elexon (BMRS Insights) and NESO (CKAN data portal) clients, a local SQLite cache, generic exploratory plotting (price time series, distribution, by-hour, by-weekday, two-series overlay, grouped bar, stacked bar), a script -- `wattstack-explore` -- for reproducible batch reports, and `notebooks/`: `explore.py` (general interactive query-shaping) plus a growing family of `spar_*.py` notebooks reproducing individual charts from Elexon's System Prices Analysis Report (SPAR) -- `spar_frequency_of_system_prices.py` and `spar_accepted_offer_volume_by_fuel_type.py` so far. All are plain `.py` files, not `.ipynb` -- diffs like normal code. Separate from `core`/`web` on purpose: this is for *you*, to build intuition about real data before deciding what to build next, not a dependency of the app itself. **Before trusting it**: I could not reach elexon.co.uk or neso.energy from the environment this was written in, so both are researched-and-documented, not tested against live traffic -- run `wattstack-explore --verify-only` first, it fails loudly and specifically if either has drifted. NESO's live EAC results resource IDs (Nov 2023 onwards, DC/DM/DR + BR/QR/SR) are confirmed directly from NESO's own results page -- but the exact price/volume field names inside that resource still aren't confirmed; `verify_schema()` and the notebooks' schema-preview cells will show you the real ones. The offer-volume notebook is more approximate still: BOALF has no explicit Bid/Offer flag, so direction is inferred from level change (`offer_volume()`/`bid_volume()`), a relative-magnitude proxy, not a settlement-grade MWh figure. And confirmed against live data: Elexon's `fuelType` field doesn't reliably tag BESS at all -- both `explore.py` and `spar_accepted_offer_volume_by_fuel_type.py` now combine a fuel-type-label match with an ID-pattern match and display the actual matched units for you to check (a naive ID pattern demonstrably also catches real non-battery stations, see ADR 0007).
 
 Each of `core/`, `web/`, and `ingestion/` carries its own
 `.vscode/settings.json` (pins that package's `.venv` interpreter) and
@@ -59,7 +59,7 @@ intentionally local-only).
 
 Creates all three packages' virtualenvs, installs `web`'s dependency on
 `core` as an editable local path, runs migrations, and runs all three
-test suites (20 core tests + 6 web tests + 46 ingestion tests). Safe to re-run.
+test suites (20 core tests + 6 web tests + 88 ingestion tests). Safe to re-run.
 
 ### CLI, by hand
 
@@ -79,12 +79,14 @@ wattstack run --config scenarios/example.yaml --sweep
 cd ingestion
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest -v                                    # 46 tests, all mocked -- no network needed
+pytest -v                                    # 88 tests, all mocked -- no network needed
 
 wattstack-explore --verify-only              # confirm both APIs still match what's documented
 wattstack-explore --days 14                  # writes charts to reports/
 
-marimo edit notebooks/explore.py             # interactive: reshape, plot, iterate on a query
+marimo edit notebooks/explore.py                                    # general interactive query-shaping
+marimo edit notebooks/spar_frequency_of_system_prices.py            # SPAR: frequency by GBP20 bin, long/short
+marimo edit notebooks/spar_accepted_offer_volume_by_fuel_type.py    # SPAR: daily offer volume, stacked by fuel type + BSAA
 ```
 
 ### Web UI, by hand

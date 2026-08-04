@@ -3,9 +3,9 @@
 PriceProvider is the seam between the optimizer/backtest engine and
 wherever price data actually comes from. SyntheticPriceProvider is a
 deterministic stand-in for demos and tests -- NOT real market data.
-The natural next implementation is an ElexonPriceProvider / a NESO
-EAC-results provider, reusing the ingestion pattern already proven in
-the glasshouse project's `ingestion/` module.
+Real implementations (ElexonPriceProvider, NesoPriceProvider) are
+ROADMAP.md Phase B, reusing the ingestion pattern already proven in
+`ingestion/`.
 """
 from __future__ import annotations
 
@@ -19,12 +19,13 @@ PERIODS_PER_DAY = 48
 
 
 class PriceProvider(Protocol):
-    def energy_prices(self, day: date) -> list[float]:
+    def wholesale_prices(self, day: date) -> list[float]:
         """48 half-hourly GBP/MWh prices for the given day."""
         ...
 
-    def response_prices(self, day: date, market: Market) -> list[float]:
-        """48 half-hourly GBP/MW/h clearing prices for a response market."""
+    def reserve_prices(self, day: date, market: Market) -> list[float]:
+        """48 half-hourly prices for a MARKET_REGISTRY market -- unit
+        depends on that market's settlement_unit (see markets.py)."""
         ...
 
 
@@ -37,7 +38,7 @@ class SyntheticPriceProvider:
     small amount of day-to-day variation seeded from the date.
     """
 
-    def energy_prices(self, day: date) -> list[float]:
+    def wholesale_prices(self, day: date) -> list[float]:
         seed = day.toordinal()
         base = 70.0 + 10.0 * math.sin(seed)
         prices = []
@@ -55,12 +56,13 @@ class SyntheticPriceProvider:
             prices.append(round(max(base + shape + noise, -20.0), 2))
         return prices
 
-    def response_prices(self, day: date, market: Market) -> list[float]:
+    def reserve_prices(self, day: date, market: Market) -> list[float]:
         seed = day.toordinal() + (hash(market.value) % 97)
         base_by_market = {
-            Market.DYNAMIC_CONTAINMENT.value: 12.0,
-            Market.DYNAMIC_REGULATION.value: 6.0,
-            Market.DYNAMIC_MODERATION.value: 5.0,
+            Market.DYNAMIC_CONTAINMENT_HIGH.value: 12.0,
+            Market.DYNAMIC_CONTAINMENT_LOW.value: 11.0,
+            Market.BM_OFFER.value: 20.0,
+            Market.BM_BID.value: 8.0,
         }
         b = base_by_market.get(market.value, 5.0)
         return [round(max(b + 2 * math.sin(seed + t / 3), 0.0), 2) for t in range(PERIODS_PER_DAY)]
