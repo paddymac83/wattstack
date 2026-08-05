@@ -254,3 +254,21 @@ def aggregate_volume_by_day_and_category(
     sorted_categories = sorted(categories)
     volumes = {c: [totals.get((d, c), 0.0) for d in sorted_dates] for c in sorted_categories}
     return {"dates": sorted_dates, "categories": sorted_categories, "volumes": volumes}
+
+
+def is_flagged(value: object) -> bool:
+    """Normalise a flag field's raw value to a real boolean.
+
+    BOALF's exact encoding for SO-Flag (true JSON boolean? "Y"/"N"
+    string? 1/0?) was not confirmed live -- the dataset's full name,
+    "Bid Offer Acceptance Level Flagged," is strong evidence a flag
+    field exists there, but not what it looks like on the wire. This
+    handles the common encodings defensively rather than assuming
+    one; run the notebook's schema preview to see the real value
+    shape before trusting this blindly.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"true", "y", "yes", "1"}

@@ -6,6 +6,7 @@ from wattstack_ingestion.analysis import (
     filter_battery_bmu_ids,
     filter_bmus_by_id_pattern,
     fuel_type_lookup,
+    is_flagged,
     marginal_bid_share,
     offer_volume,
     price_lookup_by_bmu_period,
@@ -282,3 +283,33 @@ def test_aggregate_volume_treats_missing_volume_as_zero():
     rows = [{"day": "2026-06-01", "cat": "Gas"}]
     result = aggregate_volume_by_day_and_category(rows, date_field="day", category_field="cat", volume_field="vol")
     assert result["volumes"]["Gas"] == [0.0]
+
+
+# --- is_flagged ---
+
+
+def test_is_flagged_handles_real_booleans():
+    assert is_flagged(True) is True
+    assert is_flagged(False) is False
+
+
+def test_is_flagged_handles_yes_no_strings_case_insensitively():
+    assert is_flagged("Y") is True
+    assert is_flagged("yes") is True
+    assert is_flagged("N") is False
+    assert is_flagged("no") is False
+
+
+def test_is_flagged_handles_stringified_booleans():
+    assert is_flagged("true") is True
+    assert is_flagged("True") is True
+    assert is_flagged("false") is False
+
+
+def test_is_flagged_handles_numeric_encoding():
+    assert is_flagged(1) is True
+    assert is_flagged(0) is False
+
+
+def test_is_flagged_treats_none_as_unflagged():
+    assert is_flagged(None) is False
