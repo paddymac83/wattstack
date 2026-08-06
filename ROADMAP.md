@@ -51,23 +51,42 @@ verified against the new market set.
       the real LOLP-calibrated proxy, which stays Phase B work below.
 
 ### Phase B -- real, vintage-aware data
-- [ ] `ForecastProvider` protocol (mirrors `core`'s `PriceProvider`):
-      `as_of(publish_time) -> dict`. Live runs call `as_of(now)`;
-      backtests call `as_of(historical_trigger_time)` -- same code
-      path, which is what makes the backtest trustworthy rather than
-      a parallel simulation that can drift from what actually runs.
-- [ ] At least one real implementation wired end to end: Elexon demand
-      forecast, confirmed via `demand_forecast_api.py` to support
-      `/forecast/demand/day-ahead/history?publishTime=X` (also
-      `earliest`/`latest`/`evolution` variants). NESO's DC 4-day
-      forecast has a confirmed separate "History" resource, needed for
-      the same reason.
+- [x] `ForecastProvider` protocol -- see `docs/adr/0009`. Lives in
+      `ingestion/wattstack_ingestion/forecasts.py`, not `core` (core
+      doesn't consume forecasts directly yet, so the protocol doesn't
+      belong next to `PriceProvider` until something there needs it).
+      `as_of(publish_time) -> list[dict]`, deliberately no special
+      case for "now" -- a live run and a backtest run the same code
+      path, proven by a test that checks this directly, not just by
+      convention.
+- [x] First real implementation: `ElexonDemandForecastProvider`,
+      wrapping two new confirmed `ElexonClient` methods
+      (`demand_forecast_day_ahead`, `demand_forecast_day_ahead_history`).
+      Re-read `demand_forecast_api.py` directly (not from memory)
+      before writing this -- confirmed precisely: base path
+      `/forecast/demand/day-ahead`, `publishTime` query parameter
+      name on the `/history` variant. `earliest`/`latest`/`evolution`
+      variants confirmed to exist, not yet implemented.
+- [x] First real consumer: `notebooks/demand_forecast_vs_system_tightness.py`
+      -- for each historical day, calls `as_of()` at 10:00 UTC the day
+      before (the day-ahead trigger window, Phase C above) and joins
+      the result against real settlement outturn to ask whether
+      forecast demand predicts Long vs Short. Deliberately the simple
+      predecessor to the LOLP-calibrated BM proxy below, not a
+      replacement -- still exploratory, nothing here reaches the live
+      optimizer yet. See `docs/adr/0009`'s same-day update.
+      **Not yet done:** NESO's DC 4-day forecast (confirmed separate
+      "History" resource, same need) doesn't have a provider yet.
 - [ ] Generation, LOLP/margin, surplus, and indicated-generation
       forecasts (`system_forecast_api.py`, `surplus_forecast_api.py`,
       `indicated_forecast_api.py`) -- very likely the same
       `history?publishTime=` pattern (same auto-generated Insights
-      client), NOT individually confirmed yet. Verify each before
-      relying on it, same discipline as the rest of `ingestion/`.
+      client, and demand forecast's pattern is now confirmed rather
+      than assumed), but NOT individually confirmed yet. Verify each
+      before relying on it, same discipline as the rest of
+      `ingestion/` -- re-reading the actual client source, not
+      trusting a few-turns-old memory of it, is what caught demand
+      forecast's exact parameter names correctly this time.
 - [ ] Real energy and DC prices wired into `core` (`ElexonPriceProvider`,
       `NesoPriceProvider`) -- carried over from the original v1 scope.
 - [ ] Real, LOLP-calibrated pricing for `bm_offer`/`bm_bid` -- the
@@ -172,3 +191,5 @@ Don't duplicate these here:
 - `docs/adr/0007` -- BESS not identifiable by fuelType alone
 - `docs/adr/0008` -- MarketSpec registry, and correcting DC-High/
   DC-Low direction (Phase A, implemented)
+- `docs/adr/0009` -- ForecastProvider lives in ingestion; Elexon
+  demand forecast is the first implementation (Phase B, in progress)

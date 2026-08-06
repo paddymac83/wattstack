@@ -1,6 +1,6 @@
 """No real network calls -- requests.get is mocked throughout, matching
 glasshouse's ingestion test discipline."""
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -180,3 +180,57 @@ def test_bm_units_reference_returns_records_and_is_cached(mock_get, tmp_path):
     client.bm_units_reference()
     client.bm_units_reference()
     assert mock_get.call_count == 1
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_demand_forecast_day_ahead_uses_confirmed_url(mock_get):
+    row = {"settlementDate": "2026-08-01", "settlementPeriod": 1, "demand": 25000}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    rows = client.demand_forecast_day_ahead()
+    assert rows == [row]
+    called_url = mock_get.call_args.args[0]
+    assert called_url == "https://data.elexon.co.uk/bmrs/api/v1/forecast/demand/day-ahead"
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_demand_forecast_day_ahead_history_uses_publish_time_query_param(mock_get):
+    row = {"settlementDate": "2026-08-01", "settlementPeriod": 1, "demand": 25000}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    publish_time = datetime(2026, 7, 31, 9, 0, 0)
+    rows = client.demand_forecast_day_ahead_history(publish_time)
+    assert rows == [row]
+    called_url = mock_get.call_args.args[0]
+    assert called_url == (
+        "https://data.elexon.co.uk/bmrs/api/v1/forecast/demand/day-ahead/history"
+        "?publishTime=2026-07-31T09:00:00"
+    )
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_demand_forecast_history_caches_per_publish_time(mock_get, tmp_path):
+    from wattstack_ingestion.cache import Cache
+
+    mock_get.return_value = _mock_response([{"demand": 25000}])
+    client = ElexonClient(cache=Cache(tmp_path / "c.sqlite"))
+    t1 = datetime(2026, 7, 31, 9, 0, 0)
+    t2 = datetime(2026, 7, 30, 9, 0, 0)
+    client.demand_forecast_day_ahead_history(t1)
+    client.demand_forecast_day_ahead_history(t1)  # same vintage -- cached
+    client.demand_forecast_day_ahead_history(t2)  # different vintage -- real call
+    assert mock_get.call_count == 2
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_demand_forecast_schema_returns_field_names(mock_get):
+    mock_get.return_value = _mock_response([{"settlementDate": "2026-08-01", "demand": 25000}])
+    fields = ElexonClient().verify_demand_forecast_schema()
+    assert fields == {"settlementDate", "demand"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_demand_forecast_schema_raises_clearly_when_no_records(mock_get):
+    mock_get.return_value = _mock_response([])
+    with pytest.raises(RuntimeError, match="zero demand forecast records"):
+        ElexonClient().verify_demand_forecast_schema()

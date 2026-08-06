@@ -21,12 +21,12 @@ def _():
     from wattstack_ingestion.cache import Cache
     from wattstack_ingestion.elexon import ElexonClient
     from wattstack_ingestion.plots import stacked_bar_chart
-
     return (
         Cache,
         ElexonClient,
         aggregate_volume_by_day_and_category,
         bid_volume,
+        calendar,
         date,
         is_flagged,
         mo,
@@ -39,45 +39,47 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("""
-    # SPAR: Daily volume of SO-Flagged / non-Flagged actions
+    mo.md(
+        """
+        # SPAR: Daily volume of SO-Flagged / non-Flagged actions
 
-    Reproduces "Daily volume of SO-Flagged/non-Flagged actions"
-    from Elexon's System Prices Analysis Report.
+        Reproduces "Daily volume of SO-Flagged/non-Flagged actions"
+        from Elexon's System Prices Analysis Report.
 
-    Source: https://www.elexon.co.uk/bsc/data/system-prices-analysis-report/
+        Source: https://www.elexon.co.uk/bsc/data/system-prices-analysis-report/
 
-    **What SO-Flag actually means, quoted from Elexon's own
-    methodology, not inferred:** the Imbalance Price calculation
-    tries to separate "energy" balancing actions (which should set
-    the price) from "system" balancing actions (locational
-    constraint management, which shouldn't). "The System Operator
-    (SO) flags actions when they are taken to resolve a locational
-    constraint on the transmission network." Flagged actions
-    aren't simply excluded -- they may be re-priced via a separate
-    Classification/Replacement Price process. This is a distinct
-    flag from CADL-Flag (short-duration corrective actions, <10
-    min) -- this notebook targets SO-Flag specifically, matching
-    the chart title.
+        **What SO-Flag actually means, quoted from Elexon's own
+        methodology, not inferred:** the Imbalance Price calculation
+        tries to separate "energy" balancing actions (which should set
+        the price) from "system" balancing actions (locational
+        constraint management, which shouldn't). "The System Operator
+        (SO) flags actions when they are taken to resolve a locational
+        constraint on the transmission network." Flagged actions
+        aren't simply excluded -- they may be re-priced via a separate
+        Classification/Replacement Price process. This is a distinct
+        flag from CADL-Flag (short-duration corrective actions, <10
+        min) -- this notebook targets SO-Flag specifically, matching
+        the chart title.
 
-    **"Buy" and "Sell" here are Elexon's own terms for the same
-    direction split already built for the fuel-type notebook**:
-    Buy actions are taken when the system is short (Offer-
-    direction, `offer_volume()`); Sell actions when the system is
-    long (Bid-direction, `bid_volume()`). Reused directly, not
-    rebuilt.
+        **"Buy" and "Sell" here are Elexon's own terms for the same
+        direction split already built for the fuel-type notebook**:
+        Buy actions are taken when the system is short (Offer-
+        direction, `offer_volume()`); Sell actions when the system is
+        long (Bid-direction, `bid_volume()`). Reused directly, not
+        rebuilt.
 
-    **Two real things stated plainly, not glossed over:** BOALF's
-    full name is "Bid Offer Acceptance Level *Flagged*" -- strong
-    evidence a flag field genuinely lives in this data, but the
-    exact field name and value encoding (`true`/`false`? `"Y"`/
-    `"N"`? `1`/`0`?) were not confirmed live -- `is_flagged()`
-    handles the plausible encodings defensively. And direction
-    (Buy/Sell) is still the same *inferred* signal as before (from
-    level change), not a confirmed explicit field -- if the schema
-    preview below reveals a real direction field, that would be
-    worth switching to.
-    """)
+        **Two real things stated plainly, not glossed over:** BOALF's
+        full name is "Bid Offer Acceptance Level *Flagged*" -- strong
+        evidence a flag field genuinely lives in this data, but the
+        exact field name and value encoding (`true`/`false`? `"Y"`/
+        `"N"`? `1`/`0`?) were not confirmed live -- `is_flagged()`
+        handles the plausible encodings defensively. And direction
+        (Buy/Sell) is still the same *inferred* signal as before (from
+        level change), not a confirmed explicit field -- if the schema
+        preview below reveals a real direction field, that would be
+        worth switching to.
+        """
+    )
     return
 
 
@@ -100,14 +102,12 @@ def _(date, mo, timedelta):
 
 @app.cell
 def _(days_to_fetch, mo):
-    mo.md(f"""
-    *Acceptances are fetched one settlement period at a time -- {days_to_fetch.value} day(s) is ~{days_to_fetch.value * 48} requests.*
-    """)
+    mo.md(f"*Acceptances are fetched one settlement period at a time -- {days_to_fetch.value} day(s) is ~{days_to_fetch.value * 48} requests.*")
     return
 
 
 @app.cell
-def _(date, days_to_fetch, elexon, fetch, mo, month_picker, pd, timedelta):
+def _(date, elexon, fetch, mo, month_picker, days_to_fetch, pd, timedelta):
     mo.stop(not fetch.value, mo.md("*Click Fetch to load acceptances.*"))
 
     _rows = []
@@ -141,27 +141,29 @@ def _(acceptances_df, mo):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## The table: every action, its direction, and its flag status
+    mo.md(
+        """
+        ## The table: every action, its direction, and its flag status
 
-    Direction comes from `offer_volume()`/`bid_volume()` (level
-    change); flag status from whichever field you picked above,
-    run through `is_flagged()`. Rows with no net direction (equal
-    level-from/level-to) are dropped -- they carry no volume
-    either way. Check this looks sane before trusting the chart.
-    """)
+        Direction comes from `offer_volume()`/`bid_volume()` (level
+        change); flag status from whichever field you picked above,
+        run through `is_flagged()`. Rows with no net direction (equal
+        level-from/level-to) are dropped -- they carry no volume
+        either way. Check this looks sane before trusting the chart.
+        """
+    )
     return
 
 
 @app.cell
 def _(
     acceptances_df,
-    bid_volume,
     is_flagged,
     level_from_field,
     level_to_field,
     mo,
     offer_volume,
+    bid_volume,
     pd,
     so_flag_field,
 ):
@@ -208,19 +210,12 @@ def _(categorised_df, mo):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## The chart: daily volume by direction and flag status
-    """)
+    mo.md("## The chart: daily volume by direction and flag status")
     return
 
 
 @app.cell
-def _(
-    aggregate_volume_by_day_and_category,
-    categorised_df,
-    mo,
-    stacked_bar_chart,
-):
+def _(aggregate_volume_by_day_and_category, categorised_df, mo, stacked_bar_chart):
     mo.stop(categorised_df.empty)
 
     _agg = aggregate_volume_by_day_and_category(

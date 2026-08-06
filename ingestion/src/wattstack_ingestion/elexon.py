@@ -15,7 +15,7 @@ separately as Market Index Data if you want to add that later.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import requests
 
@@ -174,6 +174,53 @@ class ElexonClient:
             records.extend(self.bid_offer_data(settlement_date, period))
         return records
 
+    def disaggregated_bsad(self, settlement_date: date, settlement_period: int) -> list[dict]:
+        """Disaggregated Balancing Services Adjustment Data (DISBSAD)
+        -- 'BSAA' in SPAR's own terminology: balancing volume from
+        outside the ordinary Bid/Offer stack (system-to-system
+        services, STOR taken outside the BM, forward contracted
+        energy products).
+
+        UNVERIFIED against live traffic, same status as
+        bid_offer_data(): the query-param pattern is modeled on the
+        confirmed acceptances fix (ADR 0006), not independently
+        tested. Endpoint path found in Elexon's own API docs as
+        /balancing/nonbm/disbsad/details -- if this 400s, query
+        params vs path segments is the first thing to check, the same
+        lesson as last time.
+        """
+        cache_key = f"elexon:disbsad:{settlement_date.isoformat()}:{settlement_period}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = (
+            f"{BASE_URL}/balancing/nonbm/disbsad/details"
+            f"?settlementDate={settlement_date.isoformat()}&settlementPeriod={settlement_period}"
+        )
+        response = requests.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def disaggregated_bsad_for_day(self, settlement_date: date) -> list[dict]:
+        """All 48 periods, same cost profile as the other _for_day
+        methods -- 48 requests. Combined with
+        bid_offer_acceptances_for_day() for a full day's picture (BM
+        actions + non-BM BSAA actions), that's ~96 requests per day --
+        a full month is ~2,900. Worth thinking about before reaching
+        for a whole month, not after.
+        """
+        records: list[dict] = []
+        for period in range(1, 49):
+            records.extend(self.disaggregated_bsad(settlement_date, period))
+        return records
+
     def bm_units_reference(self) -> list[dict]:
         """Standing reference data for every BM Unit -- the only way
         to know which BM unit IDs are batteries. UNVERIFIED against
@@ -197,3 +244,84 @@ class ElexonClient:
         if self.cache is not None:
             self.cache.set(cache_key, records)
         return records
+
+    def demand_forecast_day_ahead(self) -> list[dict]:
+        """Latest day-ahead national demand forecast (NDF/TSDF).
+
+        Endpoint path confirmed directly from Elexon's own API client
+        source (demand_forecast_api.py: GET /forecast/demand/day-ahead,
+        no required parameters) -- more solidly confirmed than most of
+        this module, since it came from reading the actual client
+        code, not documentation. Field NAMES inside each row were NOT
+        confirmed the same way; the endpoint's own description says
+        this covers National Demand Forecast (NDF, national-level,
+        excludes station transformer/pumped storage/interconnector
+        load) and Transmission System Demand Forecast (TSDF, national
+        and zonal, includes them) -- plausibly two figures per row,
+        but the literal JSON keys are a guess until checked.
+        """
+        cache_key = "elexon:demand-forecast:latest"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/forecast/demand/day-ahead"
+        response = requests.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def demand_forecast_day_ahead_history(self, publish_time: datetime) -> list[dict]:
+        """Day-ahead national demand forecast, as it stood at
+        publish_time -- the vintage-retrieval mechanism
+        ForecastProvider (see forecasts.py) is built on.
+
+        Endpoint path and the `publishTime` query parameter name
+        confirmed directly from Elexon's own API client source
+        (demand_forecast_api.py: GET /forecast/demand/day-ahead/history,
+        required `publish_time` -> query param `publishTime`).
+
+        Pass a timezone-aware datetime (UTC) if at all possible. GB
+        market timing (gate closure, forecast release cadence) is
+        specifically about which moment "09:00" means -- a naive
+        datetime is sent as-is via isoformat(), which risks silently
+        meaning the wrong instant rather than erroring.
+        """
+        cache_key = f"elexon:demand-forecast:history:{publish_time.isoformat()}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/forecast/demand/day-ahead/history"
+        payload = {"publishTime": publish_time.isoformat()}
+
+        # Make the request (requests will safely encode '+' to '%2B')
+        response = requests.get(url, params=payload, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def verify_demand_forecast_schema(self) -> set[str]:
+        """Fetch the latest demand forecast and confirm it's
+        reachable and returns real rows. Can't assert specific field
+        names since none were confirmed live (see
+        demand_forecast_day_ahead()'s docstring) -- this confirms the
+        endpoint still works and shows you what's actually there.
+        """
+        records = self.demand_forecast_day_ahead()
+        if not records:
+            raise RuntimeError(
+                "Elexon returned zero demand forecast records -- check the endpoint is still "
+                f"{BASE_URL}/forecast/demand/day-ahead."
+            )
+        return set(records[0].keys())
