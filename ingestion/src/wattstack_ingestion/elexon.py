@@ -93,6 +93,15 @@ class ElexonClient:
         settlementPeriod are query parameters, not path segments --
         an earlier version of this method guessed path segments by
         analogy with system-prices, and that guess was wrong.
+
+        Query values are passed via `params=`, not hand-built into the
+        URL string -- `requests` handles percent-encoding correctly
+        this way (a literal `+` built into a URL string, for example,
+        is a real bug: it means "space" in a query string, not a plus
+        sign). Found live, in demand_forecast_day_ahead_history()'s
+        publishTime value, not by any test here -- mocking
+        `requests.get` means these tests were never exercising real
+        wire-level encoding to begin with. See docs/adr/0011.
         """
         cache_key = f"elexon:acceptances:{settlement_date.isoformat()}:{settlement_period}"
         if self.cache is not None:
@@ -100,11 +109,9 @@ class ElexonClient:
             if cached is not None:
                 return cached
 
-        url = (
-            f"{BASE_URL}/balancing/acceptances/all"
-            f"?settlementDate={settlement_date.isoformat()}&settlementPeriod={settlement_period}"
-        )
-        response = requests.get(url, timeout=self.timeout)
+        url = f"{BASE_URL}/balancing/acceptances/all"
+        params = {"settlementDate": settlement_date.isoformat(), "settlementPeriod": settlement_period}
+        response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
         records = payload if isinstance(payload, list) else payload.get("data", [])
@@ -135,11 +142,9 @@ class ElexonClient:
             if cached is not None:
                 return cached
 
-        url = (
-            f"{BASE_URL}/balancing/bid-offer/all"
-            f"?settlementDate={settlement_date.isoformat()}&settlementPeriod={settlement_period}"
-        )
-        response = requests.get(url, timeout=self.timeout)
+        url = f"{BASE_URL}/balancing/bid-offer/all"
+        params = {"settlementDate": settlement_date.isoformat(), "settlementPeriod": settlement_period}
+        response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
         records = payload if isinstance(payload, list) else payload.get("data", [])
@@ -195,11 +200,9 @@ class ElexonClient:
             if cached is not None:
                 return cached
 
-        url = (
-            f"{BASE_URL}/balancing/nonbm/disbsad/details"
-            f"?settlementDate={settlement_date.isoformat()}&settlementPeriod={settlement_period}"
-        )
-        response = requests.get(url, timeout=self.timeout)
+        url = f"{BASE_URL}/balancing/nonbm/disbsad/details"
+        params = {"settlementDate": settlement_date.isoformat(), "settlementPeriod": settlement_period}
+        response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
         records = payload if isinstance(payload, list) else payload.get("data", [])
@@ -291,6 +294,13 @@ class ElexonClient:
         specifically about which moment "09:00" means -- a naive
         datetime is sent as-is via isoformat(), which risks silently
         meaning the wrong instant rather than erroring.
+
+        Fixed live (by direct testing against the real API, not by
+        anything in this test suite): `requests` needs the timestamp
+        passed via `params=`, not built into the URL string --
+        isoformat()'s `+00:00` UTC offset is a literal `+` character,
+        which means "space" if it ends up unescaped in a query string.
+        See docs/adr/0011.
         """
         cache_key = f"elexon:demand-forecast:history:{publish_time.isoformat()}"
         if self.cache is not None:
@@ -299,10 +309,8 @@ class ElexonClient:
                 return cached
 
         url = f"{BASE_URL}/forecast/demand/day-ahead/history"
-        payload = {"publishTime": publish_time.isoformat()}
-
-        # Make the request (requests will safely encode '+' to '%2B')
-        response = requests.get(url, params=payload, timeout=self.timeout)
+        params = {"publishTime": publish_time.isoformat()}
+        response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
         records = payload if isinstance(payload, list) else payload.get("data", [])
@@ -323,5 +331,172 @@ class ElexonClient:
             raise RuntimeError(
                 "Elexon returned zero demand forecast records -- check the endpoint is still "
                 f"{BASE_URL}/forecast/demand/day-ahead."
+            )
+        return set(records[0].keys())
+
+    def loss_of_load_forecast(
+        self,
+        from_time: datetime,
+        to_time: datetime,
+        settlement_period_from: int | None = None,
+        settlement_period_to: int | None = None,
+    ) -> list[dict]:
+        """Loss of Load Probability and De-rated Margin forecast
+        (LOLPDRM) over a date/time range.
+
+        Endpoint, query parameters, and the horizon semantics
+        confirmed directly from Elexon's own API client source
+        (system_forecast_api.py: GET /forecast/system/loss-of-load,
+        required `from`/`to`, optional `settlementPeriodFrom`/
+        `settlementPeriodTo`, both 1-50 inclusive -- not 1-48; GB's
+        autumn clock-change day has 50 settlement periods, the reason
+        for the wider range).
+
+        Genuinely different shape from demand_forecast_day_ahead_history():
+        there is no publishTime/history mechanism here at all. Instead
+        ONE call returns FIVE forecast horizons per settlement period
+        (1h, 2h, 4h, 8h, and "12h+" ahead), confirmed from the
+        endpoint's own description: for the 1/2/4/8h horizons, the
+        value is whatever forecast existed exactly that many hours
+        before the period; for 12h+, it's the most recent forecast
+        published 12 or more hours before. This does NOT fit
+        ForecastProvider.as_of()'s single-publish_time shape --
+        deliberately not wrapped in that protocol yet, see
+        docs/adr/0010.
+
+        Field names for the actual LOLP/margin VALUES per horizon are
+        NOT confirmed (no response model was available to read, only
+        the endpoint signature) -- use verify_loss_of_load_schema()
+        and look at the real keys before assuming which column is
+        which horizon.
+
+        Query values passed via `params=`, same fix as
+        demand_forecast_day_ahead_history() -- isoformat()'s `+00:00`
+        UTC offset is a literal `+`, which a hand-built query string
+        sends as-is but means "space" once actually parsed. See
+        docs/adr/0011.
+        """
+        cache_key = f"elexon:lolp:{from_time.isoformat()}:{to_time.isoformat()}:{settlement_period_from}:{settlement_period_to}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/forecast/system/loss-of-load"
+        params = {"from": from_time.isoformat(), "to": to_time.isoformat()}
+        if settlement_period_from is not None:
+            params["settlementPeriodFrom"] = settlement_period_from
+        if settlement_period_to is not None:
+            params["settlementPeriodTo"] = settlement_period_to
+
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def verify_loss_of_load_schema(self, from_time: datetime, to_time: datetime) -> set[str]:
+        """Fetch a small window and confirm the endpoint is reachable
+        and returns real rows. Can't assert specific field names --
+        none were confirmed (see loss_of_load_forecast()'s docstring)
+        -- this confirms the endpoint still works and shows you what's
+        actually there, including which columns hold which horizon.
+        """
+        records = self.loss_of_load_forecast(from_time, to_time)
+        if not records:
+            raise RuntimeError(
+                "Elexon returned zero loss-of-load records -- check the endpoint is still "
+                f"{BASE_URL}/forecast/system/loss-of-load."
+            )
+        return set(records[0].keys())
+
+    def wind_forecast(self, from_time: datetime, to_time: datetime) -> list[dict]:
+        """Latest wind generation forecast (WINDFOR), MW -- wind farms
+        visible to NESO with operational metering.
+
+        Endpoint confirmed directly from Elexon's own API
+        documentation (bmrs.elexon.co.uk/api-documentation/endpoint/
+        forecast/generation/wind): GET /forecast/generation/wind,
+        "filtered by a range of DateTime parameters." Published up to
+        8 times a day by NESO, at fixed times: 03:30, 05:30, 08:30,
+        10:30, 12:30, 16:30, 19:30, 23:30 -- a real, sourced fact
+        worth knowing for trigger timing: the day-ahead trigger at
+        10:00 UTC falls just after the 08:30 publication, so that's
+        the freshest vintage actually available at decision time, not
+        10:30's.
+
+        Field names inside each row NOT confirmed -- no response
+        model was available to read, only the documentation
+        description. Use verify_wind_forecast_schema() before
+        trusting field names.
+        """
+        cache_key = f"elexon:wind-forecast:{from_time.isoformat()}:{to_time.isoformat()}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/forecast/generation/wind"
+        params = {"from": from_time.isoformat(), "to": to_time.isoformat()}
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def wind_forecast_history(self, publish_time: datetime) -> list[dict]:
+        """Wind generation forecast, as it stood at publish_time --
+        the vintage-retrieval mechanism this needs to be a real
+        ForecastProvider, unlike LOLPDRM (see ADR 0010 -- LOLP has no
+        history mechanism at all; wind genuinely does).
+
+        Endpoint confirmed to exist directly from Elexon's own API
+        documentation (.../forecast/generation/wind/history) -- but
+        the exact query parameter name for publish_time was NOT
+        independently confirmed for this specific endpoint the way
+        demand forecast's was (that came from reading
+        demand_forecast_api.py's source directly; this came from
+        documentation prose, which didn't show parameter names).
+        `publishTime` is used here because every other confirmed
+        /history endpoint in this whole module uses it -- a strong,
+        repeated pattern, not a certainty for this one specifically.
+        verify_wind_forecast_schema() is where you'd find out if that
+        assumption is wrong.
+        """
+        cache_key = f"elexon:wind-forecast:history:{publish_time.isoformat()}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/forecast/generation/wind/history"
+        params = {"publishTime": publish_time.isoformat()}
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def verify_wind_forecast_schema(self, from_time: datetime, to_time: datetime) -> set[str]:
+        """Fetch a small window and confirm the endpoint is reachable
+        and returns real rows. Can't assert specific field names --
+        none were confirmed (see wind_forecast()'s docstring) -- this
+        confirms the endpoint still works and shows you what's
+        actually there.
+        """
+        records = self.wind_forecast(from_time, to_time)
+        if not records:
+            raise RuntimeError(
+                "Elexon returned zero wind forecast records -- check the endpoint is still "
+                f"{BASE_URL}/forecast/generation/wind."
             )
         return set(records[0].keys())

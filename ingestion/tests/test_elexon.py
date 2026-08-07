@@ -82,11 +82,8 @@ def test_bid_offer_acceptances_uses_query_params_not_path_segments(mock_get):
     client = ElexonClient()
     rows = client.bid_offer_acceptances(date(2026, 7, 1), 5)
     assert rows == [row]
-    called_url = mock_get.call_args.args[0]
-    assert called_url == (
-        "https://data.elexon.co.uk/bmrs/api/v1/balancing/acceptances/all"
-        "?settlementDate=2026-07-01&settlementPeriod=5"
-    )
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/balancing/acceptances/all"
+    assert mock_get.call_args.kwargs["params"] == {"settlementDate": "2026-07-01", "settlementPeriod": 5}
 
 
 @patch("wattstack_ingestion.elexon.requests.get")
@@ -96,11 +93,8 @@ def test_bid_offer_data_uses_query_params(mock_get):
     client = ElexonClient()
     rows = client.bid_offer_data(date(2026, 7, 1), 5)
     assert rows == [row]
-    called_url = mock_get.call_args.args[0]
-    assert called_url == (
-        "https://data.elexon.co.uk/bmrs/api/v1/balancing/bid-offer/all"
-        "?settlementDate=2026-07-01&settlementPeriod=5"
-    )
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/balancing/bid-offer/all"
+    assert mock_get.call_args.kwargs["params"] == {"settlementDate": "2026-07-01", "settlementPeriod": 5}
 
 
 @patch("wattstack_ingestion.elexon.requests.get")
@@ -131,11 +125,8 @@ def test_disaggregated_bsad_uses_query_params(mock_get):
     client = ElexonClient()
     rows = client.disaggregated_bsad(date(2026, 7, 1), 5)
     assert rows == [row]
-    called_url = mock_get.call_args.args[0]
-    assert called_url == (
-        "https://data.elexon.co.uk/bmrs/api/v1/balancing/nonbm/disbsad/details"
-        "?settlementDate=2026-07-01&settlementPeriod=5"
-    )
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/balancing/nonbm/disbsad/details"
+    assert mock_get.call_args.kwargs["params"] == {"settlementDate": "2026-07-01", "settlementPeriod": 5}
 
 
 @patch("wattstack_ingestion.elexon.requests.get")
@@ -201,11 +192,8 @@ def test_demand_forecast_day_ahead_history_uses_publish_time_query_param(mock_ge
     publish_time = datetime(2026, 7, 31, 9, 0, 0)
     rows = client.demand_forecast_day_ahead_history(publish_time)
     assert rows == [row]
-    called_url = mock_get.call_args.args[0]
-    assert called_url == (
-        "https://data.elexon.co.uk/bmrs/api/v1/forecast/demand/day-ahead/history"
-        "?publishTime=2026-07-31T09:00:00"
-    )
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/forecast/demand/day-ahead/history"
+    assert mock_get.call_args.kwargs["params"] == {"publishTime": "2026-07-31T09:00:00"}
 
 
 @patch("wattstack_ingestion.elexon.requests.get")
@@ -234,3 +222,134 @@ def test_verify_demand_forecast_schema_raises_clearly_when_no_records(mock_get):
     mock_get.return_value = _mock_response([])
     with pytest.raises(RuntimeError, match="zero demand forecast records"):
         ElexonClient().verify_demand_forecast_schema()
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_loss_of_load_forecast_uses_confirmed_from_to_params(mock_get):
+    row = {"settlementDate": "2026-08-01", "settlementPeriod": 1, "lolp1h": 0.01}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    rows = client.loss_of_load_forecast(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    assert rows == [row]
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/forecast/system/loss-of-load"
+    assert mock_get.call_args.kwargs["params"] == {"from": "2026-08-01T00:00:00", "to": "2026-08-02T00:00:00"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_loss_of_load_forecast_includes_optional_settlement_period_params(mock_get):
+    mock_get.return_value = _mock_response([{"demand": 1}])
+    client = ElexonClient()
+    client.loss_of_load_forecast(
+        datetime(2026, 8, 1), datetime(2026, 8, 2), settlement_period_from=10, settlement_period_to=20
+    )
+    called_params = mock_get.call_args.kwargs["params"]
+    assert called_params["settlementPeriodFrom"] == 10
+    assert called_params["settlementPeriodTo"] == 20
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_loss_of_load_forecast_omits_settlement_period_params_when_not_given(mock_get):
+    mock_get.return_value = _mock_response([{"demand": 1}])
+    client = ElexonClient()
+    client.loss_of_load_forecast(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    called_params = mock_get.call_args.kwargs["params"]
+    assert "settlementPeriodFrom" not in called_params
+    assert "settlementPeriodTo" not in called_params
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_timezone_aware_publish_time_plus_offset_goes_through_params_not_the_url_string(mock_get):
+    """The actual bug, reproduced directly: a tz-aware datetime's
+    isoformat() contains a literal '+' (e.g. '+00:00'), which means
+    'space' if it ends up unescaped in a URL string. This asserts the
+    raw '+'-containing string is passed via params -- where requests
+    percent-encodes it correctly -- not concatenated into the url
+    argument, which is exactly how this broke live."""
+    from datetime import timezone
+
+    mock_get.return_value = _mock_response([{"demand": 1}])
+    client = ElexonClient()
+    publish_time = datetime(2026, 7, 31, 10, 0, 0, tzinfo=timezone.utc)
+    client.demand_forecast_day_ahead_history(publish_time)
+
+    called_url = mock_get.call_args.args[0]
+    called_params = mock_get.call_args.kwargs["params"]
+    assert "+" not in called_url  # nothing timestamp-shaped leaked into the URL itself
+    assert called_params["publishTime"] == "2026-07-31T10:00:00+00:00"
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_loss_of_load_forecast_caches_per_unique_range(mock_get, tmp_path):
+    from wattstack_ingestion.cache import Cache
+
+    mock_get.return_value = _mock_response([{"demand": 1}])
+    client = ElexonClient(cache=Cache(tmp_path / "c.sqlite"))
+    client.loss_of_load_forecast(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    client.loss_of_load_forecast(datetime(2026, 8, 1), datetime(2026, 8, 2))  # same range -- cached
+    client.loss_of_load_forecast(datetime(2026, 8, 2), datetime(2026, 8, 3))  # different range -- real call
+    assert mock_get.call_count == 2
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_loss_of_load_schema_returns_field_names(mock_get):
+    mock_get.return_value = _mock_response([{"settlementPeriod": 1, "lolp1h": 0.01}])
+    fields = ElexonClient().verify_loss_of_load_schema(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    assert fields == {"settlementPeriod", "lolp1h"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_loss_of_load_schema_raises_clearly_when_no_records(mock_get):
+    mock_get.return_value = _mock_response([])
+    with pytest.raises(RuntimeError, match="zero loss-of-load records"):
+        ElexonClient().verify_loss_of_load_schema(datetime(2026, 8, 1), datetime(2026, 8, 2))
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_wind_forecast_uses_confirmed_from_to_params(mock_get):
+    row = {"settlementDate": "2026-08-01", "settlementPeriod": 1, "generation": 8500}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    rows = client.wind_forecast(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    assert rows == [row]
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/forecast/generation/wind"
+    assert mock_get.call_args.kwargs["params"] == {"from": "2026-08-01T00:00:00", "to": "2026-08-02T00:00:00"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_wind_forecast_history_uses_publish_time_param(mock_get):
+    row = {"settlementDate": "2026-08-01", "settlementPeriod": 1, "generation": 8500}
+    mock_get.return_value = _mock_response([row])
+    client = ElexonClient()
+    publish_time = datetime(2026, 7, 31, 8, 30, 0)
+    rows = client.wind_forecast_history(publish_time)
+    assert rows == [row]
+    assert mock_get.call_args.args[0] == "https://data.elexon.co.uk/bmrs/api/v1/forecast/generation/wind/history"
+    assert mock_get.call_args.kwargs["params"] == {"publishTime": "2026-07-31T08:30:00"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_wind_forecast_history_caches_per_publish_time(mock_get, tmp_path):
+    from wattstack_ingestion.cache import Cache
+
+    mock_get.return_value = _mock_response([{"generation": 8500}])
+    client = ElexonClient(cache=Cache(tmp_path / "c.sqlite"))
+    t1 = datetime(2026, 7, 31, 8, 30, 0)
+    t2 = datetime(2026, 7, 30, 8, 30, 0)
+    client.wind_forecast_history(t1)
+    client.wind_forecast_history(t1)  # same vintage -- cached
+    client.wind_forecast_history(t2)  # different vintage -- real call
+    assert mock_get.call_count == 2
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_wind_forecast_schema_returns_field_names(mock_get):
+    mock_get.return_value = _mock_response([{"settlementPeriod": 1, "generation": 8500}])
+    fields = ElexonClient().verify_wind_forecast_schema(datetime(2026, 8, 1), datetime(2026, 8, 2))
+    assert fields == {"settlementPeriod", "generation"}
+
+
+@patch("wattstack_ingestion.elexon.requests.get")
+def test_verify_wind_forecast_schema_raises_clearly_when_no_records(mock_get):
+    mock_get.return_value = _mock_response([])
+    with pytest.raises(RuntimeError, match="zero wind forecast records"):
+        ElexonClient().verify_wind_forecast_schema(datetime(2026, 8, 1), datetime(2026, 8, 2))

@@ -77,39 +77,60 @@ verified against the new market set.
       optimizer yet. See `docs/adr/0009`'s same-day update.
       **Not yet done:** NESO's DC 4-day forecast (confirmed separate
       "History" resource, same need) doesn't have a provider yet.
-- [ ] Generation, LOLP/margin, surplus, and indicated-generation
-      forecasts (`system_forecast_api.py`, `surplus_forecast_api.py`,
-      `indicated_forecast_api.py`) -- very likely the same
-      `history?publishTime=` pattern (same auto-generated Insights
-      client, and demand forecast's pattern is now confirmed rather
-      than assumed), but NOT individually confirmed yet. Verify each
-      before relying on it, same discipline as the rest of
-      `ingestion/` -- re-reading the actual client source, not
-      trusting a few-turns-old memory of it, is what caught demand
-      forecast's exact parameter names correctly this time.
+- [x] LOLP/margin (`system_forecast_api.py`, LOLPDRM) -- confirmed
+      directly from source, and the pattern assumed here turned out
+      wrong: no `history?publishTime=` mechanism at all. One call
+      returns five forecast horizons at once (1h/2h/4h/8h/12h+) --
+      genuinely different from demand forecast's shape, not a variant
+      of it. `ElexonClient.loss_of_load_forecast()` implemented as a
+      plain method, deliberately not forced into `ForecastProvider`.
+      See `docs/adr/0010`. Wired into `notebooks/demand_forecast_vs_system_tightness.py`
+      as an additive second section -- LOLP compared side by side with
+      demand, not a replacement notebook. Field-name-for-which-horizon
+      still unconfirmed; that's what the notebook's value-field
+      dropdown is for.
+- [ ] Generation, surplus, and indicated-generation forecasts
+      (`generation_forecast_api.py`, `surplus_forecast_api.py`,
+      `indicated_forecast_api.py`) -- given LOLP's pattern turned out
+      to differ from demand forecast's, don't assume any of these
+      three match either. Read each source file before writing a
+      client method, not before this time.
 - [ ] Real energy and DC prices wired into `core` (`ElexonPriceProvider`,
       `NesoPriceProvider`) -- carried over from the original v1 scope.
-- [ ] Real, LOLP-calibrated pricing for `bm_offer`/`bm_bid` -- the
-      registry entries themselves are already built (Phase A,
-      `docs/adr/0008`), directional and structurally correct
-      (`bm_offer` discharge, `bm_bid` charge, mirroring DC-High/
-      DC-Low), but still priced by `SyntheticPriceProvider`
-      placeholders. BM prices/volumes genuinely cannot be forecast
-      day-ahead -- what's proposed instead is a calibrated *tightness
-      proxy*, not a real forecast:
-      - Use LOLP (and/or margin/surplus) forecasts, already on the API
-        list, as a forward-looking system-tightness signal.
-      - Calibrate against real historical outturn: bucket by LOLP
-        decile, and for each bucket look at the realised probability
-        and price distribution of `classify_system_length()` (already
-        built, already validated against Elexon's own published
-        SPAR figures) -- Short periods historically command higher
-        System Prices than Long ones, which is exactly the asymmetry
+- [ ] Real, calibrated pricing for `bm_offer`/`bm_bid` -- the registry
+      entries themselves are already built (Phase A, `docs/adr/0008`),
+      directional and structurally correct (`bm_offer` discharge,
+      `bm_bid` charge, mirroring DC-High/DC-Low), but still priced by
+      `SyntheticPriceProvider` placeholders. BM prices/volumes
+      genuinely cannot be forecast day-ahead -- what's proposed
+      instead is a calibrated *tightness proxy*, not a real forecast:
+      - **Correction, from real data (`docs/adr/0012`):** LOLP/margin
+        was the planned signal, on the reasoning that combining
+        demand and generation should beat demand alone. Tested against
+        real winter and summer weeks: LOLP sits at ~0 across every
+        horizon (correct behaviour -- it measures rare capacity-
+        adequacy risk, not routine balancing noise) and de-rated
+        margin shows no relationship to NIV direction (it answers a
+        different, coarser, slower-moving question than NIV does).
+        LOLP is not the signal. Wind was chosen as the next candidate
+        (`docs/adr/0013`) over falling back to demand-alone, since
+        wind forecast error is the actual dominant driver of the
+        short-term balancing noise that margin turned out not to
+        explain.
+      - Whichever signal: calibrate against real historical outturn,
+        the same shape regardless -- bucket by the chosen variable,
+        and for each bucket look at the realised probability and price
+        distribution of `classify_system_length()` (already built,
+        already validated against Elexon's own published SPAR
+        figures) -- Short periods historically command higher System
+        Prices than Long ones, which is exactly the asymmetry
         `bm_offer` vs `bm_bid` needs to reflect.
       - This is an empirical relationship, not a formula to guess at
-        -- explore and validate it in a new marimo notebook (same
-        "explore, then promote" workflow as everything else in
-        `ingestion/`) before any of it reaches the live optimizer.
+        -- explore and validate it in a notebook (same "explore, then
+        promote" workflow as everything else in `ingestion/`) before
+        any of it reaches the live optimizer. Already proven valuable
+        once: this is exactly the discipline that caught LOLP being
+        the wrong signal before any code depended on it.
       - Real limit, stated plainly: this improves *how much capacity
         the day-ahead plan reserves* for probable BM upside -- it does
         not make BM day-ahead-schedulable in the literal sense. Actual
@@ -119,6 +140,63 @@ verified against the new market set.
         granularity as wholesale -- a simplification, worth revisiting
         once real acceptance-duration data (already fetchable via
         `bid_offer_acceptances`) is actually examined.
+      - [x] Demand forecast validated as a starting single-variable
+        proxy: three real 7-day windows (winter/spring/summer) show
+        higher forecast demand genuinely correlates with more Short
+        periods, but imperfectly -- expected, since demand is only
+        half of the balance that determines tightness (wind
+        generation forecast error is the other half, and demand
+        forecast says nothing about it).
+      - [x] LOLP/margin added as a second interpretable variable and
+        tested against real data (winter + summer) -- **result:
+        rejected as a signal for this purpose**, not inconclusive. See
+        `docs/adr/0012` for why LOLP measuring capacity adequacy
+        rather than routine balancing noise makes this the correct,
+        expected outcome rather than a failed experiment. The
+        client method and notebook section stay -- they're right for
+        a genuinely different question (capacity-stress analysis),
+        just not this one.
+      - [x] Wind added as a third variable, framed correctly around
+        **volatility** (price dispersion, `spread_by_bin()`/
+        `spread_chart()`) rather than reusing the direction-counting
+        approach from demand/LOLP -- volatility and direction are
+        different questions, see `docs/adr/0013`. Wind genuinely fits
+        `ForecastProvider` (confirmed real `/history` endpoint,
+        unlike LOLP) -- `ElexonWindForecastProvider` is the second
+        real provider implementation. **Not yet done:** the mechanism
+        is proven against mocked data (a deliberately shaped low-
+        vs-high-spread test), but whether wind forecast actually
+        predicts volatility in reality still needs the notebook run
+        against real data, the same way LOLP's rejection needed real
+        winter/summer weeks, not just a working pipeline. The
+        `publishTime` query parameter name on wind's history endpoint
+        is inferred from convention, not independently confirmed the
+        way demand forecast's was -- a real, named risk, not a silent
+        one (`verify_wind_forecast_schema()` exists to catch it).
+      - [ ] Full ML model (many forecast features, a trained
+        regressor) explicitly deferred, not rejected -- revisit once
+        Phase D's backtest exists to judge a model by realized
+        decision quality, not prediction accuracy in isolation.
+        Interpretability is a real cost of this path, not just a
+        preference: it's what makes a wrong calibration debuggable
+        instead of a second black box replacing the commercial ones
+        this project exists as an alternative to.
+- [ ] Expected-value derating for auction/acceptance risk -- BM-Offer,
+      BM-Bid, DC-High, and DC-Low all clear through competitive
+      auctions; committing capacity to a market and *not* getting
+      accepted is a real, priced risk, not an edge case (the "skip
+      rate" concept flagged in the very first research done for this
+      project). Same shape as the BM tightness proxy above, applied to
+      a different question:
+      - Optimizer objective changes from `reserve x dt x price` to
+        `reserve x dt x price x P(accepted)` -- a change to the price
+        *input*, not the LP's structure.
+      - `P(accepted)` calibrated from real historical acceptance data,
+        already fetchable: `bid_offer_acceptances_for_day()` for BM,
+        the confirmed NESO EAC resource IDs (`neso.py`) for DC-High/
+        DC-Low.
+      - Same sequencing discipline as everything else here: notebook
+        first, real data, validated before it reaches `optimizer.py`.
 
 ### Phase C -- the app itself
 - [ ] `wattstack serve` -- pip-installable console script wrapping
@@ -193,3 +271,24 @@ Don't duplicate these here:
   DC-Low direction (Phase A, implemented)
 - `docs/adr/0009` -- ForecastProvider lives in ingestion; Elexon
   demand forecast is the first implementation (Phase B, in progress)
+- `docs/adr/0010` -- LOLP/margin doesn't fit ForecastProvider's shape
+  (five horizons per call, no vintage mechanism) -- stayed a plain
+  client method; wired into the demand-forecast notebook as a second,
+  additive section (Phase B, in progress)
+- `docs/adr/0011` -- query parameters go through `requests`' `params=`,
+  not hand-built URL strings -- found live (a timezone offset's `+`
+  meant "space" when sent unescaped), not by anything in this test
+  suite; fixed in all five affected methods, not just the one
+  reported. A real, named limitation of mocking `requests.get`
+  entirely: these tests prove intent, not wire-level correctness.
+- `docs/adr/0012` -- LOLPDRM doesn't predict short-term NIV direction,
+  tested against real winter and summer data -- a genuine correction
+  to the BM-proxy plan, not a failed experiment. LOLP measures rare
+  capacity-adequacy risk; NIV reflects routine, every-period balancing
+  noise. Different questions, different timescales.
+- `docs/adr/0013` -- wind forecast added as a volatility signal
+  (`spread_by_bin`/`spread_chart`), deliberately not the direction-
+  counting approach reused from demand/LOLP -- volatility and
+  direction are different questions. Wind genuinely fits
+  `ForecastProvider`, unlike LOLP; the mechanism is proven against
+  mocked data, the real-data finding isn't in yet.

@@ -75,7 +75,7 @@ def _fake_get_for_battery_id_test(url, params=None, timeout=30):
             {"bmuId": "T_DUNGB-1", "fuelType": "NUCLEAR"},
         ]
     elif "acceptances" in url:
-        period = int(url.rsplit("=", 1)[-1])
+        period = (params or {}).get("settlementPeriod")
         resp.json.return_value = (
             [
                 {"settlementPeriod": 1, "bmUnit": "T_KILSB-2", "levelTo": 5},
@@ -85,7 +85,7 @@ def _fake_get_for_battery_id_test(url, params=None, timeout=30):
             else []
         )
     elif "bid-offer" in url:
-        period = int(url.rsplit("=", 1)[-1])
+        period = (params or {}).get("settlementPeriod")
         resp.json.return_value = (
             [
                 {"settlementPeriod": 1, "bmUnit": "T_KILSB-2", "offer": 150.0},

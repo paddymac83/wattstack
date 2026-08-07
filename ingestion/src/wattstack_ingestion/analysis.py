@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections import defaultdict
 
 
@@ -272,3 +273,45 @@ def is_flagged(value: object) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"true", "y", "yes", "1"}
+
+
+def spread_by_bin(bin_values: list[float], target_values: list[float], bin_width: float) -> dict:
+    """Bin `bin_values` into bin_width-wide buckets and compute the
+    spread (standard deviation) of `target_values` within each bucket
+    -- e.g. does a higher wind forecast bucket correlate with more
+    volatile (higher std-dev) actual System Prices, regardless of
+    which direction they move.
+
+    Deliberately different from bin_counts_by_group(): that answers
+    "does this variable predict direction" (counts per group); this
+    answers "does this variable predict dispersion" (spread within a
+    bucket) -- volatility and direction are different questions, and
+    conflating them by reusing the counting function would answer the
+    wrong one.
+
+    Returns {"bin_labels": [...], "counts": [...], "means": [...],
+    "std_devs": [...]} -- aligned lists, one entry per bin. A bucket
+    with fewer than 2 observations gets std_dev 0.0 (undefined
+    otherwise), not an error -- worth checking `counts` before
+    trusting a bucket's std_dev if the sample is thin.
+    """
+    if not bin_values:
+        return {"bin_labels": [], "counts": [], "means": [], "std_devs": []}
+
+    lo = math.floor(min(bin_values) / bin_width) * bin_width
+    hi = math.ceil(max(bin_values) / bin_width) * bin_width
+    n_bins = max(int(round((hi - lo) / bin_width)), 1)
+
+    bin_labels = [f"{lo + i * bin_width:g} to {lo + (i + 1) * bin_width:g}" for i in range(n_bins)]
+    buckets: list[list[float]] = [[] for _ in range(n_bins)]
+
+    for bv, tv in zip(bin_values, target_values):
+        idx = int((bv - lo) // bin_width)
+        idx = min(max(idx, 0), n_bins - 1)  # clamp a value exactly at hi into the last bin
+        buckets[idx].append(tv)
+
+    counts = [len(b) for b in buckets]
+    means = [round(statistics.mean(b), 2) if b else 0.0 for b in buckets]
+    std_devs = [round(statistics.stdev(b), 2) if len(b) >= 2 else 0.0 for b in buckets]
+
+    return {"bin_labels": bin_labels, "counts": counts, "means": means, "std_devs": std_devs}

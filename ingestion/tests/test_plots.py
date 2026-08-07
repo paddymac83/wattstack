@@ -9,6 +9,7 @@ from wattstack_ingestion.plots import (
     price_by_weekday,
     price_distribution,
     price_timeseries,
+    spread_chart,
     stacked_bar_chart,
 )
 
@@ -86,3 +87,27 @@ def test_stacked_bar_chart_uses_stack_barmode():
         categories=["a"], series={"x": [1]}, title="Test", x_label="X", y_label="Y",
     )
     assert fig.layout.barmode == "stack"
+
+
+def test_spread_chart_uses_means_as_bar_heights():
+    fig = spread_chart(
+        categories=["0-10", "10-20"], means=[41.0, 50.0], std_devs=[1.4, 40.0], counts=[2, 2],
+        title="Test", x_label="X", y_label="Y",
+    )
+    assert list(fig.data[0].y) == [41.0, 50.0]
+
+
+def test_spread_chart_includes_error_bars_from_std_devs():
+    fig = spread_chart(
+        categories=["0-10", "10-20"], means=[41.0, 50.0], std_devs=[1.4, 40.0], counts=[2, 2],
+        title="Test", x_label="X", y_label="Y",
+    )
+    assert list(fig.data[0].error_y.array) == [1.4, 40.0]
+
+
+def test_spread_chart_carries_sample_counts_for_hover_context():
+    fig = spread_chart(
+        categories=["0-10"], means=[41.0], std_devs=[1.4], counts=[2],
+        title="Test", x_label="X", y_label="Y",
+    )
+    assert list(fig.data[0].customdata) == [2]

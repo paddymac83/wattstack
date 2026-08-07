@@ -139,3 +139,43 @@ def stacked_bar_chart(
     )
     fig.update_xaxes(tickangle=-45)
     return fig
+
+
+def spread_chart(
+    categories: list[str],
+    means: list[float],
+    std_devs: list[float],
+    counts: list[int],
+    title: str,
+    x_label: str,
+    y_label: str,
+) -> go.Figure:
+    """Mean with error bars (+/- one standard deviation) per category
+    -- built for spread_by_bin()'s output. This shows dispersion, not
+    a count -- the right chart for "does this variable predict
+    volatility," as distinct from grouped_bar_chart's "does this
+    variable predict which group wins."
+
+    Sample size is shown in hover text, not just implied -- a wide
+    error bar on a bucket with 2 observations means something very
+    different from the same width on a bucket with 200."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=categories,
+            y=means,
+            error_y=dict(type="data", array=std_devs, visible=True),
+            marker_color="#2a78d6",
+            customdata=counts,
+            hovertemplate="%{x}<br>mean: %{y}<br>n: %{customdata}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        margin=dict(l=60, r=20, t=50, b=90),
+        showlegend=False,
+    )
+    fig.update_xaxes(tickangle=-45)
+    return fig

@@ -10,6 +10,7 @@ from wattstack_ingestion.analysis import (
     marginal_bid_share,
     offer_volume,
     price_lookup_by_bmu_period,
+    spread_by_bin,
 )
 
 BMUNITS = [
@@ -313,3 +314,34 @@ def test_is_flagged_handles_numeric_encoding():
 
 def test_is_flagged_treats_none_as_unflagged():
     assert is_flagged(None) is False
+
+
+# --- spread_by_bin ---
+
+
+def test_spread_by_bin_computes_mean_and_stdev_per_bucket():
+    # bin 0-10: prices [40, 42] -> low spread. bin 10-20: prices [10, 90] -> high spread.
+    bin_values = [5.0, 6.0, 15.0, 16.0]
+    target_values = [40.0, 42.0, 10.0, 90.0]
+    result = spread_by_bin(bin_values, target_values, bin_width=10.0)
+    assert result["bin_labels"] == ["0 to 10", "10 to 20"]
+    assert result["counts"] == [2, 2]
+    assert result["means"] == [41.0, 50.0]
+    assert result["std_devs"][0] < result["std_devs"][1]  # first bucket is genuinely less volatile
+
+
+def test_spread_by_bin_gives_zero_stdev_for_single_observation_bucket():
+    result = spread_by_bin([5.0], [40.0], bin_width=10.0)
+    assert result["counts"] == [1]
+    assert result["std_devs"] == [0.0]  # undefined for n=1, not an error
+
+
+def test_spread_by_bin_handles_empty_input():
+    result = spread_by_bin([], [], bin_width=10.0)
+    assert result == {"bin_labels": [], "counts": [], "means": [], "std_devs": []}
+
+
+def test_spread_by_bin_clamps_value_at_upper_edge_into_last_bin():
+    result = spread_by_bin([0.0, 10.0], [1.0, 2.0], bin_width=10.0)
+    assert result["bin_labels"] == ["0 to 10"]
+    assert result["counts"] == [2]

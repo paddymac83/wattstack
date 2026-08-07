@@ -57,3 +57,30 @@ class ElexonDemandForecastProvider:
 
     def as_of(self, publish_time: datetime) -> list[dict]:
         return self.client.demand_forecast_day_ahead_history(publish_time)
+
+
+class ElexonWindForecastProvider:
+    """Wind generation forecast (WINDFOR), vintage-aware.
+
+    Unlike LOLPDRM (ADR 0010), wind genuinely fits this protocol --
+    confirmed directly from Elexon's own API documentation that a real
+    history/publishTime mechanism exists here, not five horizons
+    bundled into one call. The exact query parameter name for
+    publish_time wasn't independently confirmed for this specific
+    endpoint the way demand forecast's was (see
+    ElexonClient.wind_forecast_history()'s docstring) -- `publishTime`
+    is used because it's the repeated convention everywhere else in
+    this module, not because this one endpoint's parameter name was
+    read from source.
+
+    UNVERIFIED against live traffic. Before relying on the *content*
+    of what as_of() returns, run
+    ElexonClient.verify_wind_forecast_schema() and look at the real
+    keys.
+    """
+
+    def __init__(self, client: ElexonClient | None = None):
+        self.client = client or ElexonClient()
+
+    def as_of(self, publish_time: datetime) -> list[dict]:
+        return self.client.wind_forecast_history(publish_time)

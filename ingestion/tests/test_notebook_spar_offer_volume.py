@@ -57,10 +57,10 @@ def _fake_get(url, params=None, timeout=30):
             {"bmuId": "T_WIND-1", "fuelType": "WIND"},
         ]
     elif "disbsad" in url:
-        period = int(url.rsplit("=", 1)[-1])
+        period = (params or {}).get("settlementPeriod")
         resp.json.return_value = [{"bmUnit": "BSAA-STOR", "volume": 20.0}] if period == 1 else []
     elif "acceptances" in url:
-        period = int(url.rsplit("=", 1)[-1])
+        period = (params or {}).get("settlementPeriod")
         if period == 1:
             resp.json.return_value = [
                 {"bmUnit": "T_GAS-1", "settlementPeriod": 1, "levelFrom": 100.0, "levelTo": 150.0},
@@ -87,7 +87,7 @@ def _fake_get_bess(url, params=None, timeout=30):
     elif "disbsad" in url:
         resp.json.return_value = []
     elif "acceptances" in url:
-        period = int(url.rsplit("=", 1)[-1])
+        period = (params or {}).get("settlementPeriod")
         if period == 1:
             resp.json.return_value = [
                 {"bmUnit": "T_KILSB-2", "settlementPeriod": 1, "levelFrom": 100.0, "levelTo": 150.0},

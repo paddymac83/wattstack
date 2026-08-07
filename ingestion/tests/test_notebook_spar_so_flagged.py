@@ -51,7 +51,7 @@ def _fake_get(url, params=None, timeout=30):
     resp = MagicMock()
     resp.status_code = 200
     resp.raise_for_status = MagicMock()
-    period = int(url.rsplit("=", 1)[-1])
+    period = (params or {}).get("settlementPeriod")
     if period == 1:
         resp.json.return_value = [
             {"levelFrom": 100.0, "levelTo": 150.0, "soFlag": True},   # Buy, SO-Flagged
