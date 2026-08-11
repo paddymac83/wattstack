@@ -1,15 +1,22 @@
+import pytest
+
 from wattstack_ingestion.analysis import (
     aggregate_volume_by_day_and_category,
     bid_volume,
     bin_counts_by_group,
     classify_system_length,
+    direction_from_sign,
+    efa_block_label,
+    efa_block_label_for_index,
     filter_battery_bmu_ids,
     filter_bmus_by_id_pattern,
     fuel_type_lookup,
     is_flagged,
+    largest_value_by_group,
     marginal_bid_share,
     offer_volume,
     price_lookup_by_bmu_period,
+    seasonal_average_by_period,
     spread_by_bin,
 )
 
@@ -345,3 +352,151 @@ def test_spread_by_bin_clamps_value_at_upper_edge_into_last_bin():
     result = spread_by_bin([0.0, 10.0], [1.0, 2.0], bin_width=10.0)
     assert result["bin_labels"] == ["0 to 10"]
     assert result["counts"] == [2]
+
+
+# --- efa_block_label ---
+
+
+def test_efa_block_label_for_each_block_start_hour():
+    assert efa_block_label(23) == "23:00-03:00"
+    assert efa_block_label(3) == "03:00-07:00"
+    assert efa_block_label(7) == "07:00-11:00"
+    assert efa_block_label(11) == "11:00-15:00"
+    assert efa_block_label(15) == "15:00-19:00"
+    assert efa_block_label(19) == "19:00-23:00"
+
+
+def test_efa_block_label_for_hours_within_a_block_not_just_boundaries():
+    assert efa_block_label(0) == "23:00-03:00"   # midnight, inside the wraparound block
+    assert efa_block_label(1) == "23:00-03:00"
+    assert efa_block_label(5) == "03:00-07:00"
+    assert efa_block_label(22) == "19:00-23:00"
+
+
+def test_efa_block_label_covers_all_24_hours_without_gaps_or_overlap():
+    """Every hour must map to exactly one block -- confirms the
+    wraparound logic and the boundary conditions are both correct,
+    not just spot-checked at a few points."""
+    labels = [efa_block_label(h) for h in range(24)]
+    assert len(labels) == 24
+    assert all(labels)  # none raised, none empty
+    assert len(set(labels)) == 6  # exactly the 6 standard blocks, no extras
+
+
+def test_efa_block_label_rejects_invalid_hour():
+    with pytest.raises(ValueError):
+        efa_block_label(24)
+
+
+# --- efa_block_label_for_index ---
+
+
+def test_efa_block_label_for_index_matches_efa_block_label_at_block_starts():
+    """EFA1..EFA6 should map to exactly the same labels
+    efa_block_label() produces from each block's start hour -- these
+    two functions describe the same 6 blocks from different input
+    shapes and must agree."""
+    assert efa_block_label_for_index(1) == efa_block_label(23)
+    assert efa_block_label_for_index(2) == efa_block_label(3)
+    assert efa_block_label_for_index(3) == efa_block_label(7)
+    assert efa_block_label_for_index(4) == efa_block_label(11)
+    assert efa_block_label_for_index(5) == efa_block_label(15)
+    assert efa_block_label_for_index(6) == efa_block_label(19)
+
+
+def test_efa_block_label_for_index_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        efa_block_label_for_index(0)
+    with pytest.raises(ValueError):
+        efa_block_label_for_index(7)
+
+
+# --- direction_from_sign ---
+
+
+def test_direction_from_sign_positive_is_import():
+    assert direction_from_sign(500.0) == "Import"
+
+
+def test_direction_from_sign_negative_is_export():
+    assert direction_from_sign(-500.0) == "Export"
+
+
+def test_direction_from_sign_zero_is_import_by_tiebreak():
+    assert direction_from_sign(0.0) == "Import"
+
+
+# --- largest_value_by_group ---
+
+
+def test_largest_value_by_group_finds_the_max_per_group():
+    rows = [
+        {"day": "2026-06-01", "value": 800},
+        {"day": "2026-06-01", "value": 1200},  # max for this day
+        {"day": "2026-06-01", "value": 400},
+        {"day": "2026-06-02", "value": 900},
+    ]
+    result = largest_value_by_group(rows, group_field="day", value_field="value")
+    assert result["2026-06-01"]["max_value"] == 1200.0
+    assert result["2026-06-01"]["count"] == 3
+    assert result["2026-06-02"]["max_value"] == 900.0
+    assert result["2026-06-02"]["count"] == 1
+
+
+def test_largest_value_by_group_does_not_take_absolute_value():
+    """Values are used as given -- the caller is responsible for
+    signing/filtering appropriately first."""
+    rows = [{"day": "2026-06-01", "value": -1500}, {"day": "2026-06-01", "value": 200}]
+    result = largest_value_by_group(rows, group_field="day", value_field="value")
+    assert result["2026-06-01"]["max_value"] == 200.0  # not 1500 -- no abs() applied
+
+
+def test_largest_value_by_group_skips_rows_missing_group_or_value():
+    rows = [{"day": None, "value": 999}, {"day": "2026-06-01", "value": None}, {"day": "2026-06-01", "value": 100}]
+    result = largest_value_by_group(rows, group_field="day", value_field="value")
+    assert result == {"2026-06-01": {"max_value": 100.0, "count": 1}}
+
+
+def test_largest_value_by_group_handles_empty_input():
+    assert largest_value_by_group([], group_field="day", value_field="value") == {}
+
+
+# --- seasonal_average_by_period ---
+
+
+def test_seasonal_average_by_period_pools_across_days():
+    rows = [
+        {"settlementPeriod": 1, "price": 40.0},  # day 1
+        {"settlementPeriod": 1, "price": 60.0},  # day 2
+        {"settlementPeriod": 2, "price": 100.0},
+    ]
+    result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price")
+    assert result[1] == 50.0  # (40+60)/2, pooled across both days
+    assert result[2] == 100.0
+
+
+def test_seasonal_average_by_period_excludes_zero_by_default():
+    """The real, sourced MID data-quality issue: N2EX shows all-zero
+    values for some dates. These must not silently drag the average
+    toward zero."""
+    rows = [{"settlementPeriod": 1, "price": 0.0}, {"settlementPeriod": 1, "price": 80.0}]
+    result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price")
+    assert result[1] == 80.0  # not 40.0 -- the zero row is excluded, not averaged in
+
+
+def test_seasonal_average_by_period_can_disable_exclusion():
+    rows = [{"settlementPeriod": 1, "price": 0.0}, {"settlementPeriod": 1, "price": 80.0}]
+    result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price", exclude_values=set())
+    assert result[1] == 40.0  # zero included this time -- caller explicitly opted out
+
+
+def test_seasonal_average_by_period_omits_periods_with_no_surviving_data():
+    rows = [{"settlementPeriod": 1, "price": 0.0}]  # only observation for period 1, and it's excluded
+    result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price")
+    assert 1 not in result  # absent, not zero-filled -- caller decides the fallback
+
+
+def test_seasonal_average_by_period_skips_rows_missing_period_or_value():
+    rows = [{"settlementPeriod": None, "price": 999}, {"settlementPeriod": 1, "price": None}, {"settlementPeriod": 1, "price": 50.0}]
+    result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price")
+    assert result == {1: 50.0}

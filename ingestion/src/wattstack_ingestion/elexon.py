@@ -15,7 +15,7 @@ separately as Market Index Data if you want to add that later.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -498,5 +498,225 @@ class ElexonClient:
             raise RuntimeError(
                 "Elexon returned zero wind forecast records -- check the endpoint is still "
                 f"{BASE_URL}/forecast/generation/wind."
+            )
+        return set(records[0].keys())
+
+    def actual_generation_per_bmu(
+        self, settlement_date: date, settlement_period: int, bm_unit_id: str | None = None
+    ) -> list[dict]:
+        """Actual Generation Output Per Generation Unit (B1610) --
+        settled, reconciled metered volume (MWh) for one or all BM
+        units in a single settlement period. Includes interconnectors:
+        positive values there are generally import into GB, negative
+        export out of GB, though that sign convention isn't
+        independently confirmed here -- check it against a real
+        response before trusting it (a known large importer/
+        exporter's sign should be checkable against known real-world
+        flow direction on a given day).
+
+        Endpoint and query parameters confirmed directly from Elexon's
+        own API documentation page
+        (bmrs.elexon.co.uk/api-documentation/endpoint/datasets/B1610):
+        GET /datasets/B1610 with `settlementDate` and
+        `settlementPeriod` -- ONE settlement period per call, not a
+        date range.
+
+        This corrects a genuine earlier mistake, not a rename: the
+        first version of this method used `from`/`to`, sourced from a
+        BSC Insight article and a third-party wrapper's convenience
+        function (`ElexonDataPortal.get_B1610(start_date, end_date)`)
+        rather than the actual API documentation page. That wrapper's
+        own Python parameter names are not the same thing as the REST
+        API's real query parameters -- conflating the two is exactly
+        the mistake. The real shape puts this method in the same
+        per-period family as bid_offer_acceptances()/bid_offer_data(),
+        not the from/to bulk-range family loss_of_load_forecast() and
+        wind_forecast() are in -- a full day now costs 48 requests,
+        not one. See actual_generation_per_bmu_for_day() and
+        docs/adr/0016's correction.
+
+        `bm_unit_id` (optional `bmUnit` filter) was not itself flagged
+        as wrong and is kept, but wasn't independently re-confirmed
+        either when the from/to mistake was found -- treat it with the
+        same caution as everything else here that hasn't been checked
+        against a real response.
+
+        Real, sourced operational detail worth knowing before
+        reaching for this for anything time-sensitive: data is only
+        available from 5 working days after the fact (settlement
+        reconciliation lag) -- fine for historical correlation work
+        like this, useless for a live day-ahead decision.
+
+        Field names not confirmed -- verify_actual_generation_schema()
+        shows the real ones.
+        """
+        cache_key = f"elexon:b1610:{settlement_date.isoformat()}:{settlement_period}:{bm_unit_id}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/datasets/B1610"
+        params = {"settlementDate": settlement_date.isoformat(), "settlementPeriod": settlement_period}
+        if bm_unit_id is not None:
+            params["bmUnit"] = bm_unit_id
+
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def actual_generation_per_bmu_for_day(self, settlement_date: date, bm_unit_id: str | None = None) -> list[dict]:
+        """All 48 periods, same cost profile as the other _for_day
+        methods -- 48 requests, one per settlement period, each cached
+        independently. The real cost consequence of B1610 being a
+        per-period endpoint (see actual_generation_per_bmu()'s
+        docstring for the correction this reflects) -- fetching many
+        days of B1610 data adds up fast; think about how many days are
+        actually needed before reaching for this in a loop.
+        """
+        records: list[dict] = []
+        for period in range(1, 49):
+            records.extend(self.actual_generation_per_bmu(settlement_date, period, bm_unit_id=bm_unit_id))
+        return records
+
+    def verify_actual_generation_schema(self, settlement_date: date, settlement_period: int) -> set[str]:
+        """Fetch a single period and confirm the endpoint is reachable
+        and returns real rows. Can't assert specific field names --
+        none were confirmed (see actual_generation_per_bmu()'s
+        docstring).
+        """
+        records = self.actual_generation_per_bmu(settlement_date, settlement_period)
+        if not records:
+            raise RuntimeError(
+                "Elexon returned zero B1610 records -- check the endpoint is still "
+                f"{BASE_URL}/datasets/B1610, and that the date has settled (5 working day lag)."
+            )
+        return set(records[0].keys())
+
+    def market_index_data(
+        self, from_time: datetime, to_time: datetime, data_providers: list[str] | None = None
+    ) -> list[dict]:
+        """Market Index Data (MID) -- price and volume from each
+        Market Index Data Provider (N2EX, APX), reflecting short-term
+        wholesale trading. NOT a forecast: this is realised/settled
+        data, a key input to the System Price calculation, not a
+        prediction of a future price. Confirmed useless for a
+        pre-gate-closure (09:50 N2EX) trigger, where tomorrow's price
+        genuinely doesn't exist as settled fact yet -- see
+        wattstack_ingestion.prices.ElexonWholesalePriceProvider, which
+        uses this as historical training data for a seasonal average,
+        not as live input.
+
+        Real, sourced data-quality issue, confirmed live: N2EXMIDP
+        specifically showed zero price and volume for the most recent
+        several days when checked, while APXMIDP for the identical
+        period showed real, non-zero data. That rules out a general
+        MID reporting lag (which would affect both providers equally
+        for the same dates) -- this looks like an N2EX-specific feed
+        issue into MID, not a settlement-timing one. Exclude zero
+        values when averaging regardless of provider, rather than
+        letting them silently pull an average toward zero.
+
+        Endpoint, parameters, and shape corrected live against a real
+        confirmed request: GET /datasets/MID (not the opinionated
+        /balancing/pricing/market-index endpoint originally guessed),
+        with `from`/`to` (a genuine date-range, not per-period --
+        confirmed working for a full day in one call) and
+        `dataProviders` (a list, e.g. ["APXMIDP"] -- the FULL provider
+        code, not just "APX").
+
+        Worth being direct about what happened here: the earlier
+        version of this method reasoned that settlementDate/
+        settlementPeriod was the safer bet, since every other
+        confirmed opinionated endpoint in this module (including
+        B1610, once corrected) used that pattern instead of the
+        from/to a third-party wrapper suggested. That reasoning was
+        wrong for MID specifically -- from/to turned out to be
+        correct here. The lesson isn't "trust from/to" or "trust
+        settlementDate/settlementPeriod" as a rule; it's that pattern
+        inference from a handful of other endpoints is not a
+        substitute for checking the specific one, no matter how
+        consistent the sample looked.
+
+        Defaults to APXMIDP only -- confirmed live to actually return
+        real data, not chosen for being "the more liquid GB exchange"
+        the way N2EXMIDP was originally picked on general market
+        knowledge. That reasoning turned out not to matter: live data
+        showing N2EXMIDP returning zeroes while APXMIDP didn't is what
+        decided this, not which exchange is nominally more liquid.
+        Pass data_providers=["N2EXMIDP", "APXMIDP"] to include both if
+        N2EXMIDP starts reporting again.
+
+        Confirmed live: this endpoint only allows a 7-day span between
+        from and to. This method does not enforce or chunk that limit
+        itself -- it's a thin wrapper matching the confirmed shape,
+        same as every other single-call method in this class. Use
+        market_index_data_range() for anything that might need more
+        than 7 days.
+        """
+        providers = data_providers if data_providers is not None else ["APXMIDP"]
+        cache_key = f"elexon:mid:{from_time.isoformat()}:{to_time.isoformat()}:{','.join(providers)}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        url = f"{BASE_URL}/datasets/MID"
+        params = {"from": from_time.isoformat(), "to": to_time.isoformat(), "dataProviders": providers}
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        records = payload if isinstance(payload, list) else payload.get("data", [])
+
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def market_index_data_range(
+        self, from_time: datetime, to_time: datetime, data_providers: list[str] | None = None
+    ) -> list[dict]:
+        """market_index_data() for an arbitrary-length window, chunked
+        into <=7-day requests to respect MID's confirmed 7-day range
+        limit -- the safe way to fetch more than a week of MID data.
+        Each chunk is cached independently by market_index_data(), so
+        overlapping calls (e.g. two wholesale_prices() calls a day
+        apart, both wanting most of the same lookback window) mostly
+        hit cache rather than re-fetching.
+
+        Real, unresolved question this method does NOT answer:
+        whether the most recent several days showing zero price and
+        volume (confirmed live) is a genuine data gap or a reporting
+        lag, the way B1610 has a confirmed 5-working-day settlement
+        lag. This method fetches whatever range it's given -- it does
+        not skip recent days on the assumption of a lag that hasn't
+        been confirmed. Test that directly: query a window from
+        several weeks back and see whether real (non-zero) data
+        appears there.
+        """
+        records: list[dict] = []
+        chunk_start = from_time
+        while chunk_start < to_time:
+            chunk_end = min(chunk_start + timedelta(days=7), to_time)
+            records.extend(self.market_index_data(chunk_start, chunk_end, data_providers=data_providers))
+            chunk_start = chunk_end
+        return records
+
+    def verify_mid_schema(self, from_time: datetime, to_time: datetime) -> set[str]:
+        """Fetch a small window and confirm the endpoint is reachable
+        and returns real rows -- also where you'd discover the real
+        field names, still unconfirmed (see market_index_data()'s
+        docstring -- the endpoint and parameters are now confirmed,
+        the response's field names are not).
+        """
+        records = self.market_index_data(from_time, to_time)
+        if not records:
+            raise RuntimeError(
+                "Elexon returned zero MID records -- check the endpoint is still "
+                f"{BASE_URL}/datasets/MID."
             )
         return set(records[0].keys())

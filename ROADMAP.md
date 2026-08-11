@@ -21,6 +21,84 @@ pass. Phased so each phase is independently useful and testable,
 matching "start simple, then add complexity" -- the phases are the
 simple-first plan, not an excuse to defer honesty about total scope.
 
+**Pivot, 2026-08-08: fast path to a real v1, not more signal research
+first.** Phase B's exploratory work (demand, LOLP, wind, DC
+requirements, inertia, largest loss) produced real, valuable findings
+-- but none of it has reached `optimizer.py` yet, and continuing to
+chase signal quality delays ever having a working app. Decision: ship
+a core day-ahead stacked optimizer across DC, BM, and wholesale now,
+with each market's data honestly labelled by how real it actually is,
+rather than waiting for every signal to be fully calibrated first.
+
+- **Wholesale [x] implemented, corrected four times, each before
+  causing real damage (`docs/adr/0017`):** (1) MID is realised/settled
+  data, not a forecast, and the trigger runs *before* N2EX's 09:50
+  gate closure, when tomorrow's price genuinely doesn't exist as
+  settled fact yet -- caught before any code was written. (2) The
+  initial guess at MID's endpoint and parameters
+  (`/balancing/pricing/market-index`, `settlementDate`/
+  `settlementPeriod`, a considered inference from every other
+  confirmed opinionated endpoint in this project) was wrong; the real
+  shape, confirmed against a live request URL, is `/datasets/MID`
+  with `from`/`to`/`dataProviders`. (3) MID also only allows a 7-day
+  span per request, also confirmed live --
+  `market_index_data_range()` chunks any longer window automatically;
+  `ElexonWholesalePriceProvider`'s default 28-day lookback now costs
+  4 chunked requests. (4) N2EXMIDP (the default data provider,
+  originally picked on general "N2EX is the more liquid GB exchange"
+  market knowledge) showed zero price and volume for the most recent
+  several days live, while APXMIDP for the identical dates showed real
+  data -- ruling out a general reporting lag, since that would affect
+  both providers equally. Default changed to APXMIDP throughout.
+  `wholesale_prices()` uses MID as historical training data: a
+  seasonal average by settlement period, never including the target
+  day itself (proven by test, not just documented), with real, sourced
+  zero-value exclusion (kept regardless of provider, in case this
+  recurs or a different provider has its own gaps later). A genuinely
+  predictive model (demand/wind forecasts as explanatory inputs) stays
+  deferred, same reasoning as `docs/adr/0012`. Implements only
+  `wholesale_prices()`, not the full `PriceProvider` protocol -- using
+  it in a stacked (DC/BM-active) optimizer run will raise
+  `AttributeError` at `reserve_prices()`, a deliberate visible failure,
+  not a silent wrong answer.
+  **Still genuinely open:** field names inside a MID row are
+  unconfirmed -- only the endpoint, query parameters, and now the
+  working data provider have been checked live.
+  **Checked and deliberately not pursued:** Nord Pool and EPEX SPOT
+  (the actual day-ahead exchanges) have no free, publicly accessible
+  API for historical auction data -- confirmed from multiple
+  independent sources, including a project built specifically to work
+  around that gap. Real access requires a paid EPEX SPOT/EEX Group
+  subscription or a paid third-party aggregator (Modo Energy, Montel).
+  Modo Energy specifically is one of the commercial platforms this
+  whole project has been positioned as a transparent, free alternative
+  to -- using their feed would be a deliberate departure from that
+  principle, not a quiet substitution, and hasn't been made.
+- **DC**: real historical clearing prices (`response_reserve_results_summary`,
+  already confirmed) -- a simple EFA-block average for v1 pricing, not
+  the inertia/loss-calibrated model from Phase B's exploratory work.
+  That sophistication is a real future upgrade, deliberately deferred,
+  not abandoned.
+- **BM**: no direction signal has held up after three attempts (demand
+  weak, LOLP rejected, wind gives volatility not direction) -- v1
+  doesn't pretend otherwise. Wind-validated volatility sizes how much
+  capacity gets reserved; a flat historical-average price values that
+  reserved capacity; a single conservative derating factor
+  acknowledges "won't always be accepted." Honest about being a
+  placeholder, not a forecast.
+- **Imperfect price capture / acceptance risk**: folded into one
+  mechanism for v1, not a research program -- a single configurable
+  derating parameter applied to DC and BM reserve revenue
+  (`expected_value = reserve x dt x price x derating_factor`), same
+  mechanical shape as the acceptance-risk design already on this
+  roadmap, with a placeholder constant instead of a calibrated
+  function. States the limitation exists rather than hiding it; does
+  not solve it.
+- The optimizer itself needs no changes for any of this --
+  `MARKET_REGISTRY` and the LP structure (Phase A) already handle this
+  shape. This is real `PriceProvider` wiring plus one derating
+  parameter, not new optimization logic.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -103,34 +181,68 @@ verified against the new market set.
       `bm_bid` charge, mirroring DC-High/DC-Low), but still priced by
       `SyntheticPriceProvider` placeholders. BM prices/volumes
       genuinely cannot be forecast day-ahead -- what's proposed
-      instead is a calibrated *tightness proxy*, not a real forecast:
-      - **Correction, from real data (`docs/adr/0012`):** LOLP/margin
-        was the planned signal, on the reasoning that combining
-        demand and generation should beat demand alone. Tested against
-        real winter and summer weeks: LOLP sits at ~0 across every
-        horizon (correct behaviour -- it measures rare capacity-
-        adequacy risk, not routine balancing noise) and de-rated
-        margin shows no relationship to NIV direction (it answers a
-        different, coarser, slower-moving question than NIV does).
-        LOLP is not the signal. Wind was chosen as the next candidate
-        (`docs/adr/0013`) over falling back to demand-alone, since
-        wind forecast error is the actual dominant driver of the
-        short-term balancing noise that margin turned out not to
-        explain.
-      - Whichever signal: calibrate against real historical outturn,
-        the same shape regardless -- bucket by the chosen variable,
-        and for each bucket look at the realised probability and price
-        distribution of `classify_system_length()` (already built,
-        already validated against Elexon's own published SPAR
-        figures) -- Short periods historically command higher System
-        Prices than Long ones, which is exactly the asymmetry
-        `bm_offer` vs `bm_bid` needs to reflect.
+      instead is a calibrated *tightness proxy*, not a real forecast.
+      **This item split into two independent threads
+      (`docs/adr/0014`), not one blocked on the other:**
+
+      **Thread 1 -- direction/bias calibration (still open).** Which
+      way to bias `bm_offer` vs `bm_bid` pricing. No working signal
+      yet:
+      - [x] Demand forecast: three real 7-day windows (winter/spring/
+        summer) show higher forecast demand genuinely correlates with
+        more Short periods, but imperfectly -- expected, since demand
+        is only half of the balance that determines tightness.
+      - [x] LOLP/margin: tested against real data (winter + summer)
+        and **rejected**, not inconclusive (`docs/adr/0012`) -- LOLP
+        measures rare capacity-adequacy risk, not the routine
+        balancing noise that drives NIV direction.
+      - [x] Wind: tested against real data and **also doesn't predict
+        direction** -- see Thread 2 below for what it turned out to
+        be good for instead.
+      - [ ] No candidate left with a usable direction signal. Next
+        step genuinely open -- possibilities include a combination of
+        the above, or accepting that day-ahead direction may not be
+        reliably predictable at this level and designing around that
+        rather than continuing to search for a single-variable proxy.
+      - Whichever signal eventually works: calibrate against real
+        historical outturn -- bucket by the variable, and for each
+        bucket look at the realised probability and price distribution
+        of `classify_system_length()` (already built, already
+        validated against Elexon's own published SPAR figures) --
+        Short periods historically command higher System Prices than
+        Long ones, exactly the asymmetry `bm_offer` vs `bm_bid` needs.
+
+      **Thread 2 -- volatility-informed capacity reservation (signal
+      validated, mechanism not designed yet).**
+      - [x] Wind forecast validated as a real volatility signal: above
+        ~4GW forecast wind, actual System Price shows meaningfully
+        higher dispersion (`docs/adr/0013`, `docs/adr/0014`). Makes
+        sense together with the direction-null result, not despite it
+        -- wind forecast error is roughly symmetric, so it should
+        predict spread without predicting sign. The 4GW threshold
+        itself hasn't been checked beyond one winter+summer sample.
+      - [ ] Design need, not yet started: how volatility actually
+        translates into how much headroom/footroom the day-ahead plan
+        reserves. The reasoning (higher volatility -> higher option
+        value in staying flexible, same logic as financial option
+        pricing) is recorded in `docs/adr/0014`; the mechanism --
+        a formula, a lookup table, something else -- is not designed.
+      - `ElexonWindForecastProvider` is the second real
+        `ForecastProvider` implementation (after demand) -- wind
+        genuinely fits the protocol, unlike LOLP, via a confirmed real
+        `/history` endpoint. The `publishTime` query parameter name is
+        inferred from convention, not independently confirmed the way
+        demand forecast's was -- a real, named risk
+        (`verify_wind_forecast_schema()` exists to catch it).
+
+      **Applies to both threads:**
       - This is an empirical relationship, not a formula to guess at
-        -- explore and validate it in a notebook (same "explore, then
+        -- explore and validate in a notebook (same "explore, then
         promote" workflow as everything else in `ingestion/`) before
         any of it reaches the live optimizer. Already proven valuable
-        once: this is exactly the discipline that caught LOLP being
-        the wrong signal before any code depended on it.
+        twice: this discipline caught LOLP being the wrong signal, and
+        caught wind answering a different question than the one it was
+        sought for, both before any code depended on either.
       - Real limit, stated plainly: this improves *how much capacity
         the day-ahead plan reserves* for probable BM upside -- it does
         not make BM day-ahead-schedulable in the literal sense. Actual
@@ -140,39 +252,6 @@ verified against the new market set.
         granularity as wholesale -- a simplification, worth revisiting
         once real acceptance-duration data (already fetchable via
         `bid_offer_acceptances`) is actually examined.
-      - [x] Demand forecast validated as a starting single-variable
-        proxy: three real 7-day windows (winter/spring/summer) show
-        higher forecast demand genuinely correlates with more Short
-        periods, but imperfectly -- expected, since demand is only
-        half of the balance that determines tightness (wind
-        generation forecast error is the other half, and demand
-        forecast says nothing about it).
-      - [x] LOLP/margin added as a second interpretable variable and
-        tested against real data (winter + summer) -- **result:
-        rejected as a signal for this purpose**, not inconclusive. See
-        `docs/adr/0012` for why LOLP measuring capacity adequacy
-        rather than routine balancing noise makes this the correct,
-        expected outcome rather than a failed experiment. The
-        client method and notebook section stay -- they're right for
-        a genuinely different question (capacity-stress analysis),
-        just not this one.
-      - [x] Wind added as a third variable, framed correctly around
-        **volatility** (price dispersion, `spread_by_bin()`/
-        `spread_chart()`) rather than reusing the direction-counting
-        approach from demand/LOLP -- volatility and direction are
-        different questions, see `docs/adr/0013`. Wind genuinely fits
-        `ForecastProvider` (confirmed real `/history` endpoint,
-        unlike LOLP) -- `ElexonWindForecastProvider` is the second
-        real provider implementation. **Not yet done:** the mechanism
-        is proven against mocked data (a deliberately shaped low-
-        vs-high-spread test), but whether wind forecast actually
-        predicts volatility in reality still needs the notebook run
-        against real data, the same way LOLP's rejection needed real
-        winter/summer weeks, not just a working pipeline. The
-        `publishTime` query parameter name on wind's history endpoint
-        is inferred from convention, not independently confirmed the
-        way demand forecast's was -- a real, named risk, not a silent
-        one (`verify_wind_forecast_schema()` exists to catch it).
       - [ ] Full ML model (many forecast features, a trained
         regressor) explicitly deferred, not rejected -- revisit once
         Phase D's backtest exists to judge a model by realized
@@ -195,6 +274,62 @@ verified against the new market set.
         already fetchable: `bid_offer_acceptances_for_day()` for BM,
         the confirmed NESO EAC resource IDs (`neso.py`) for DC-High/
         DC-Low.
+      - [x] DC requirement volumes, the first concrete input for this
+        thread: `notebooks/dc_requirements_by_efa_block.py`
+        (`docs/adr/0015`). DC is pay-as-clear, so requirement volume
+        is naturally a `P(accepted)` signal, not a price signal --
+        higher requirement means more capacity clears, so a given bid
+        is more likely to be among the accepted ones. Confirmed
+        directly from NESO's own page that DC requirements are driven
+        by demand, inertia, response volumes, and largest losses (not
+        three inputs, four). EFA blocks confirmed via a real NESO
+        market report (6 blocks, 4 hours each, starting 23:00). A
+        genuinely new access pattern needed: this dataset is CSV-
+        download-only, not `datastore_search`-active, the first
+        method in `neso.py` built that way.
+      - [x] **Real finding, from live data:** DC requirement drops as
+        inertia increases -- DC-Low between roughly 1000-1200MW,
+        DC-High 1200-1400MW, DC-High consistently above DC-Low. Makes
+        sense given the actual regulatory asymmetry: DC-High must
+        contain frequency to a 50.5Hz ceiling (only 0.5Hz of
+        headroom), while DC-Low can extend to 49.2Hz provided it
+        recovers to 49.5Hz within 60 seconds -- a tighter high-side
+        limit requiring proportionally more secured capacity. This is
+        a real, load-bearing finding now underpinning the trading
+        app's DC modelling, not a hypothesis still being checked.
+      - [x] Largest secured loss, reconstructed and joined against the
+        same inertia data (`docs/adr/0016`) to check whether it moves
+        DC requirement *independent* of inertia, not just alongside
+        it. No "largest loss" dataset exists anywhere -- confirmed by
+        search, then reconstructed from real per-BMU metered output
+        (B1610, `/datasets/B1610`, a third distinct Elexon endpoint
+        family) for SIZB and interconnectors, identified via the same
+        ID-pattern matching already proven for battery identification.
+        Import/export direction inferred from B1610's value sign --
+        **genuinely unconfirmed for interconnectors specifically**,
+        stated plainly, not glossed over. The independence check
+        itself is a median-tercile stratification (each comparison
+        built unconditional, then again restricted to the middle
+        third of the inertia range) rather than a regression --
+        simpler, and its reasoning stays fully inspectable, consistent
+        with this project's standing preference (`docs/adr/0012`).
+        **Not yet done:** the mechanism is proven against realistic
+        mocked data (16 tests, including one proving an irrelevant BMU
+        with larger output than either real candidate never leaks into
+        the loss figure) -- whether largest loss actually holds up
+        independent of inertia, and whether the import/export sign
+        convention is even correct, both need this run against real
+        data before either goes near `optimizer.py`.
+      - **Correction, confirmed live the same day:** B1610's real
+        query parameters are `settlementDate` + `settlementPeriod`,
+        not the `from`/`to` bulk-range shape first assumed (sourced,
+        wrongly, from a third-party wrapper's convenience parameter
+        names rather than Elexon's own API documentation -- exactly
+        the risk ADR 0011 already named). A full day now costs 48
+        requests, not one -- the notebook's B1610 fetch has an
+        explicit days-to-fetch slider and live cost readout as a
+        result, replacing what had been an unbounded fetch across
+        whatever range the DC requirements data happened to span.
       - Same sequencing discipline as everything else here: notebook
         first, real data, validated before it reaches `optimizer.py`.
 
@@ -292,3 +427,49 @@ Don't duplicate these here:
   direction are different questions. Wind genuinely fits
   `ForecastProvider`, unlike LOLP; the mechanism is proven against
   mocked data, the real-data finding isn't in yet.
+- `docs/adr/0014` -- wind forecast validated against real data as a
+  volatility signal (higher dispersion above ~4GW forecast), with no
+  direction relationship -- the first positive result in this line of
+  work. Splits the BM-proxy plan into two independent threads:
+  direction/bias calibration (still unresolved) and volatility-
+  informed capacity reservation (signal validated, mechanism not yet
+  designed).
+- `docs/adr/0015` -- DC requirement volumes by EFA block, the first
+  concrete input for the acceptance-risk thread. New CSV-download
+  access pattern for NESO (confirmed not datastore-active), EFA
+  blocks confirmed via a real NESO market report, real schema
+  correction after live testing (long-by-service, wide-by-EFA-column,
+  not the flat shape first assumed). Inertia tested as
+  outturn-vs-outturn, not a vintage-matched forecast -- and, from real
+  data, DC requirement genuinely drops as inertia rises, DC-High
+  consistently above DC-Low, matching the real regulatory frequency-
+  containment asymmetry (50.5Hz ceiling vs 49.2Hz/60s-recovery floor).
+- `docs/adr/0016` -- largest secured loss, reconstructed from real
+  per-BMU output (B1610) since no NESO dataset publishes it directly.
+  A third distinct Elexon endpoint family (`/datasets/{code}`).
+  Independence from inertia checked via median-tercile stratification,
+  not a regression -- simple and fully inspectable. Interconnector
+  import/export sign convention remains genuinely unconfirmed.
+  Corrected the same day, confirmed live: real params are
+  `settlementDate`/`settlementPeriod` (48 requests/day), not the
+  `from`/`to` bulk-range shape first assumed from a third-party
+  wrapper's own parameter names rather than Elexon's API docs.
+- `docs/adr/0017` -- wholesale price via seasonal average of MID
+  (Market Index Data), not live MID -- corrected before any code was
+  written once it was clear the trigger runs before N2EX's 09:50 gate
+  closure, when tomorrow's price genuinely isn't settled yet.
+  Corrected again, same day, confirmed live: the real endpoint is
+  `/datasets/MID` with `from`/`to`/`dataProviders`, not the
+  `settlementDate`/`settlementPeriod` opinionated-endpoint pattern
+  first guessed. Corrected a third time, same day: MID also only
+  allows a 7-day span per request -- `market_index_data_range()`
+  chunks longer windows automatically. Corrected a fourth time, same
+  day: N2EXMIDP (the original default, picked on general market
+  knowledge) showed zero data live while APXMIDP showed real data for
+  the same dates -- default changed to APXMIDP. Field names inside a
+  MID row remain the one thing still unconfirmed. Also confirmed:
+  Nord Pool and EPEX SPOT have no free public API for day-ahead data
+  -- checked and deliberately not pursued, not silently worked around.
+  First real `PriceProvider`-compatible implementation in this project
+  (`ingestion/wattstack_ingestion/prices.py`); implements only
+  `wholesale_prices()` so far.

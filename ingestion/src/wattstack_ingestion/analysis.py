@@ -315,3 +315,148 @@ def spread_by_bin(bin_values: list[float], target_values: list[float], bin_width
     std_devs = [round(statistics.stdev(b), 2) if len(b) >= 2 else 0.0 for b in buckets]
 
     return {"bin_labels": bin_labels, "counts": counts, "means": means, "std_devs": std_devs}
+
+
+# GB's 6 standard EFA blocks, confirmed via a real NESO Frequency
+# Response Market Information Report (April 2023): "Procurement of
+# SFFR takes place across the standard 6 EFA blocks. Bids must
+# therefore only start, and end, at the following times: 2300, 0300,
+# 0700, 1100, 1500 and 1900." Each block is 4 hours; the EFA day
+# itself starts at 23:00, not midnight -- period 1 of an EFA day is
+# the 23:00 block of the *previous* calendar day.
+EFA_BLOCKS = [
+    (23, 3), (3, 7), (7, 11), (11, 15), (15, 19), (19, 23),
+]
+
+
+def efa_block_label(hour: int) -> str:
+    """Which of GB's 6 standard EFA blocks a given hour (0-23) falls
+    in. Returns a label like "23:00-03:00" -- deliberately a string,
+    not just an index, so it's directly usable as a chart category
+    without a separate lookup table.
+
+    Only takes the hour, not settlement period or minute, since every
+    EFA block boundary in EFA_BLOCKS falls on a whole hour -- correct
+    for GB's actual EFA block definition, not a simplification.
+    """
+    if not (0 <= hour <= 23):
+        raise ValueError(f"hour must be 0-23, got {hour}")
+
+    for start_hour, end_hour in EFA_BLOCKS:
+        if start_hour < end_hour:
+            if start_hour <= hour < end_hour:
+                return f"{start_hour:02d}:00-{end_hour:02d}:00"
+        else:  # wraps past midnight (the 23:00-03:00 block)
+            if hour >= start_hour or hour < end_hour:
+                return f"{start_hour:02d}:00-{end_hour:02d}:00"
+    raise ValueError(f"hour must be 0-23, got {hour}")  # pragma: no cover -- unreachable, blocks cover all 24 hours
+
+
+def efa_block_label_for_index(efa_number: int) -> str:
+    """Map a 1-indexed EFA block number to the same label format
+    efa_block_label() produces from an hour -- for datasets that give
+    the block directly as a number (or a column name like "EFA1"),
+    rather than a timestamp to derive it from. Confirmed live: NESO's
+    own DC requirements CSV has exactly this shape (columns
+    EFA1..EFA6, one row per Service_Type/forecast).
+
+    Assumes NESO numbers blocks sequentially starting from the 23:00
+    block as EFA1 -- the standard GB convention (matches EFA_BLOCKS'
+    own order), but not independently confirmed for this specific
+    column-naming scheme. Worth a sanity check against known
+    operational patterns (e.g. higher evening-peak requirement)
+    before trusting the mapping blindly on a new dataset.
+    """
+    if not (1 <= efa_number <= 6):
+        raise ValueError(f"efa_number must be 1-6, got {efa_number}")
+    start_hour, end_hour = EFA_BLOCKS[efa_number - 1]
+    return f"{start_hour:02d}:00-{end_hour:02d}:00"
+
+
+def direction_from_sign(value: float) -> str:
+    """Classify a signed flow value as "Import" (positive) or
+    "Export" (negative) -- the sign convention believed to apply to
+    interconnector rows in Elexon's B1610 data (generation/import
+    positive, demand/export negative), matching how every other BMU's
+    generation is signed. NOT independently confirmed for
+    interconnectors specifically -- check it against a real response
+    (a known large importer or exporter's sign should be checkable
+    against known real-world flow direction on a given day) before
+    trusting it.
+
+    Zero is classified Import -- a tie-break for a case that's
+    vanishingly rare in real flow data, not a documented convention.
+    """
+    return "Import" if value >= 0 else "Export"
+
+
+def largest_value_by_group(rows: list[dict], group_field: str, value_field: str) -> dict:
+    """For each distinct value of group_field, find the maximum value
+    of value_field among rows in that group -- e.g. per day, the
+    single largest generation/import output among a candidate set of
+    BM units, a proxy for the "largest secured loss" NESO would need
+    to be ready for if that unit or interconnector tripped.
+
+    Takes values as given -- does NOT take an absolute value itself,
+    so pre-filter/sign rows the way the specific question needs first
+    (e.g. filter to only Export-direction rows via direction_from_sign()
+    and pass abs() values in, if what's wanted is the largest export
+    magnitude specifically).
+
+    Returns {group_value: {"max_value": float, "count": int}} -- the
+    count is how many candidate rows contributed to that group, worth
+    checking the same way spread_by_bin()'s counts are: a "largest of
+    1" is a very different claim from a "largest of 40".
+    """
+    groups = defaultdict(list)
+    for row in rows:
+        key = row.get(group_field)
+        value = row.get(value_field)
+        if key is None or value is None:
+            continue
+        groups[key].append(float(value))
+
+    return {key: {"max_value": max(values), "count": len(values)} for key, values in groups.items()}
+
+
+def seasonal_average_by_period(
+    rows: list[dict], period_field: str, value_field: str, exclude_values: set = frozenset({0.0})
+) -> dict[int, float]:
+    """Average value per settlement period (1-48), pooled across
+    every day in `rows` -- a "climatological"/seasonal-average
+    baseline, not a forecast. Built for exactly one situation: a price
+    signal that only exists as historical/realised data (e.g. Market
+    Index Data), needed before it exists as a live fact for the day
+    being planned -- e.g. optimizing before N2EX's day-ahead gate
+    closure (09:50), when tomorrow's wholesale price genuinely isn't
+    settled yet.
+
+    `exclude_values` defaults to excluding exact zero -- a real,
+    sourced data-quality issue with MID specifically (N2EX shows
+    all-zero values for some dates) that would otherwise silently
+    drag the average toward zero rather than reflecting a real price.
+    Pass an empty set to disable exclusion if that's not appropriate
+    for a different data source.
+
+    Deliberately does not split by day-of-week or season -- pooling
+    every available day is the simple v1 version; a real predictive
+    model (using demand/wind forecasts as explanatory inputs) or a
+    day-of-week-aware average are both real future refinements, not
+    built here.
+
+    Returns {period: average_value} -- periods with no surviving
+    observations (all excluded or never seen) are simply absent, not
+    zero-filled; the caller decides how to handle a missing period.
+    """
+    buckets: dict[int, list[float]] = defaultdict(list)
+    for row in rows:
+        period = row.get(period_field)
+        value = row.get(value_field)
+        if period is None or value is None:
+            continue
+        value = float(value)
+        if value in exclude_values:
+            continue
+        buckets[int(period)].append(value)
+
+    return {period: statistics.mean(values) for period, values in buckets.items()}

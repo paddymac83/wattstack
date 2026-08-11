@@ -16,7 +16,6 @@ def _():
     from wattstack_ingestion.elexon import ElexonClient
     from wattstack_ingestion.forecasts import ElexonDemandForecastProvider, ElexonWindForecastProvider
     from wattstack_ingestion.plots import grouped_bar_chart, spread_chart
-
     return (
         Cache,
         ElexonClient,
@@ -38,98 +37,95 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("""
-    # Demand forecast vs. system tightness
+    mo.md(
+        """
+        # Demand forecast vs. system tightness
 
-    Phase B's first real *consumer* of `ForecastProvider` (ADR
-    0009), not just a proof the vintage-retrieval mechanism works.
-    Demand forecast isn't a price the optimizer can use directly
-    -- this asks a narrower, checkable question first: does a day
-    ahead's forecast demand level actually predict whether the
-    system turns out Long or Short?
+        Phase B's first real *consumer* of `ForecastProvider` (ADR
+        0009), not just a proof the vintage-retrieval mechanism works.
+        Demand forecast isn't a price the optimizer can use directly
+        -- this asks a narrower, checkable question first: does a day
+        ahead's forecast demand level actually predict whether the
+        system turns out Long or Short?
 
-    This is deliberately the simple predecessor to the
-    LOLP-calibrated BM proxy from the roadmap, not the real thing
-    -- LOLP/margin forecasts aren't wired up yet (next step, by
-    design). Demand alone is a real, if cruder, tightness signal:
-    high forecast demand plausibly correlates with the system
-    being short more often. Worth finding out before assuming it.
+        This is deliberately the simple predecessor to the
+        LOLP-calibrated BM proxy from the roadmap, not the real thing
+        -- LOLP/margin forecasts aren't wired up yet (next step, by
+        design). Demand alone is a real, if cruder, tightness signal:
+        high forecast demand plausibly correlates with the system
+        being short more often. Worth finding out before assuming it.
 
-    **Vintage matters here, not just data.** Each day's forecast
-    is fetched via `as_of()` at **10:00 UTC the day before** --
-    matching the day-ahead trigger window from the roadmap (just
-    after N2EX gate closure, confirmed 09:50 GMT). This is what
-    "what would actually have been known at decision time" means
-    in practice, not a synonym for "the latest forecast available
-    now."
+        **Vintage matters here, not just data.** Each day's forecast
+        is fetched via `as_of()` at **10:00 UTC the day before** --
+        matching the day-ahead trigger window from the roadmap (just
+        after N2EX gate closure, confirmed 09:50 GMT). This is what
+        "what would actually have been known at decision time" means
+        in practice, not a synonym for "the latest forecast available
+        now."
 
-    **Real simplification, stated plainly:** demand forecast rows
-    aren't filtered by settlement date -- Elexon's field names for
-    this endpoint aren't confirmed (see ADR 0009), so every row
-    returned by one `as_of()` call is treated as belonging to the
-    day it was fetched for. If the real response spans more than
-    one day, this will need revisiting once you can see it live.
+        **Real simplification, stated plainly:** demand forecast rows
+        aren't filtered by settlement date -- Elexon's field names for
+        this endpoint aren't confirmed (see ADR 0009), so every row
+        returned by one `as_of()` call is treated as belonging to the
+        day it was fetched for. If the real response spans more than
+        one day, this will need revisiting once you can see it live.
 
-    ## Section 2 -- LOLP/margin
+        ## Section 2 -- LOLP/margin
 
-    A genuinely different shape from demand forecast, not just a
-    second variable: LOLPDRM (Loss of Load Probability and
-    De-rated Margin) has no `publishTime`/history mechanism at
-    all. One call instead returns **five forecast horizons at
-    once** (1h, 2h, 4h, 8h, "12h+" ahead of each period), confirmed
-    directly from Elexon's own API client source. Given the
-    day-ahead trigger convention above, every period of the target
-    day is at least 14 hours ahead of the 10:00 UTC trigger -- so
-    the "12h+" column is the semantically right one for every
-    period, not a compromise. That's a real, checkable prediction;
-    this is where you check it.
+        A genuinely different shape from demand forecast, not just a
+        second variable: LOLPDRM (Loss of Load Probability and
+        De-rated Margin) has no `publishTime`/history mechanism at
+        all. One call instead returns **five forecast horizons at
+        once** (1h, 2h, 4h, 8h, "12h+" ahead of each period), confirmed
+        directly from Elexon's own API client source. Given the
+        day-ahead trigger convention above, every period of the target
+        day is at least 14 hours ahead of the 10:00 UTC trigger -- so
+        the "12h+" column is the semantically right one for every
+        period, not a compromise. That's a real, checkable prediction;
+        this is where you check it.
 
-    **Deliberately not wrapped in `ForecastProvider` yet.** Forcing
-    a five-horizons-per-call dataset into `as_of()`'s
-    one-publish-time shape would mean guessing a column name I
-    can't confirm. See `docs/adr/0010` for why this stayed a plain
-    client method instead.
+        **Deliberately not wrapped in `ForecastProvider` yet.** Forcing
+        a five-horizons-per-call dataset into `as_of()`'s
+        one-publish-time shape would mean guessing a column name I
+        can't confirm. See `docs/adr/0010` for why this stayed a plain
+        client method instead.
 
-    **Result (`docs/adr/0012`): LOLP/margin was tested against
-    real winter and summer weeks and rejected as a tightness
-    signal.** LOLP sits at ~0 across every horizon (correct
-    behaviour -- it measures rare capacity-adequacy risk, not
-    routine balancing noise) and margin shows no relationship to
-    NIV direction. Wind, below, is the next candidate -- not
-    because it's assumed better, but because wind forecast error
-    is the actual dominant driver of the short-term imbalance that
-    margin turned out not to explain.
+        **Result (`docs/adr/0012`): LOLP/margin was tested against
+        real winter and summer weeks and rejected as a tightness
+        signal.** LOLP sits at ~0 across every horizon (correct
+        behaviour -- it measures rare capacity-adequacy risk, not
+        routine balancing noise) and margin shows no relationship to
+        NIV direction. Wind, below, is the next candidate -- not
+        because it's assumed better, but because wind forecast error
+        is the actual dominant driver of the short-term imbalance that
+        margin turned out not to explain.
 
-    ## Section 3 -- wind
+        ## Section 3 -- wind
 
-    A different question from Sections 1 and 2, on purpose: this
-    asks whether wind forecast predicts **volatility** (how spread
-    out prices get), not direction (which way they lean). Reusing
-    the direction-counting approach from demand/LOLP would answer
-    the wrong question -- `spread_by_bin()` instead computes the
-    standard deviation of actual price within each wind-forecast
-    bucket, the more literal answer to "does this predict how
-    volatile the day will be."
+        A different question from Sections 1 and 2, on purpose: this
+        asks whether wind forecast predicts **volatility** (how spread
+        out prices get), not direction (which way they lean). Reusing
+        the direction-counting approach from demand/LOLP would answer
+        the wrong question -- `spread_by_bin()` instead computes the
+        standard deviation of actual price within each wind-forecast
+        bucket, the more literal answer to "does this predict how
+        volatile the day will be."
 
-    Wind genuinely fits `ForecastProvider` -- confirmed directly
-    from Elexon's own API documentation, a real `history` endpoint
-    exists, unlike LOLP. Published up to 8 times a day at fixed
-    times (03:30, 05:30, 08:30, 10:30, 12:30, 16:30, 19:30,
-    23:30); the day-ahead trigger at 10:00 UTC falls just after
-    the 08:30 publication, so the `as_of()` call below resolves to
-    that vintage, not a synthetic "10:00 exactly" forecast that
-    never existed.
-    """)
+        Wind genuinely fits `ForecastProvider` -- confirmed directly
+        from Elexon's own API documentation, a real `history` endpoint
+        exists, unlike LOLP. Published up to 8 times a day at fixed
+        times (03:30, 05:30, 08:30, 10:30, 12:30, 16:30, 19:30,
+        23:30); the day-ahead trigger at 10:00 UTC falls just after
+        the 08:30 publication, so the `as_of()` call below resolves to
+        that vintage, not a synthetic "10:00 exactly" forecast that
+        never existed.
+        """
+    )
     return
 
 
 @app.cell
-def _(
-    Cache,
-    ElexonClient,
-    ElexonDemandForecastProvider,
-    ElexonWindForecastProvider,
-):
+def _(Cache, ElexonClient, ElexonDemandForecastProvider, ElexonWindForecastProvider):
     cache = Cache("wattstack_ingestion_cache.sqlite")
     elexon = ElexonClient(cache=cache)
     forecast_provider = ElexonDemandForecastProvider(client=elexon)
@@ -153,18 +149,7 @@ def _(date, mo, timedelta):
 
 
 @app.cell
-def _(
-    datetime,
-    days_to_fetch,
-    elexon,
-    fetch,
-    forecast_provider,
-    mo,
-    pd,
-    start_date,
-    timedelta,
-    timezone,
-):
+def _(datetime, days_to_fetch, elexon, fetch, forecast_provider, mo, pd, start_date, timedelta, timezone):
     mo.stop(not fetch.value, mo.md("*Pick a start date and click Fetch.*"))
 
     _forecast_rows = []
@@ -220,27 +205,23 @@ def _(actual_df, forecast_df, mo):
             bin_width,
         ]
     )
-    return (
-        bin_width,
-        demand_field,
-        forecast_period_field,
-        niv_field,
-        price_field,
-    )
+    return bin_width, demand_field, forecast_period_field, niv_field, price_field
 
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## The table: forecast demand joined against what actually happened
+    mo.md(
+        """
+        ## The table: forecast demand joined against what actually happened
 
-    Joined on `(_day, settlement_period)` -- the day I already know
-    from the fetch loop, not a parsed date field from either raw
-    response. `system_length` comes straight from
-    `classify_system_length()`, already validated against Elexon's
-    own published SPAR figures in an earlier notebook, not new
-    logic written for this one.
-    """)
+        Joined on `(_day, settlement_period)` -- the day I already know
+        from the fetch loop, not a parsed date field from either raw
+        response. `system_length` comes straight from
+        `classify_system_length()`, already validated against Elexon's
+        own published SPAR figures in an earlier notebook, not new
+        logic written for this one.
+        """
+    )
     return
 
 
@@ -286,9 +267,7 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## The chart: does forecast demand predict Long vs Short?
-    """)
+    mo.md("## The chart: does forecast demand predict Long vs Short?")
     return
 
 
@@ -310,17 +289,7 @@ def _(bin_counts_by_group, bin_width, grouped_bar_chart, joined_df, mo):
 
 
 @app.cell
-def _(
-    datetime,
-    days_to_fetch,
-    elexon,
-    fetch,
-    mo,
-    pd,
-    start_date,
-    timedelta,
-    timezone,
-):
+def _(datetime, days_to_fetch, elexon, fetch, mo, pd, start_date, timedelta, timezone):
     mo.stop(not fetch.value, mo.md("*Click Fetch above to also load LOLP/margin data.*"))
 
     _from = datetime(start_date.value.year, start_date.value.month, start_date.value.day, tzinfo=timezone.utc)
@@ -352,27 +321,22 @@ def _(lolp_df, mo):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ### The table: LOLP/margin added to the existing demand comparison
+    mo.md(
+        """
+        ### The table: LOLP/margin added to the existing demand comparison
 
-    Joined onto `joined_df` above by `(day, settlement_period)` --
-    LOLP's own date field is truncated to its first 10 characters
-    to tolerate either a bare date or a full datetime string,
-    since the real format isn't confirmed. Rows with no LOLP match
-    are dropped here, not silently zero-filled.
-    """)
+        Joined onto `joined_df` above by `(day, settlement_period)` --
+        LOLP's own date field is truncated to its first 10 characters
+        to tolerate either a bare date or a full datetime string,
+        since the real format isn't confirmed. Rows with no LOLP match
+        are dropped here, not silently zero-filled.
+        """
+    )
     return
 
 
 @app.cell
-def _(
-    joined_df,
-    lolp_date_field,
-    lolp_df,
-    lolp_period_field,
-    lolp_value_field,
-    mo,
-):
+def _(joined_df, lolp_bin_width, lolp_date_field, lolp_df, lolp_period_field, lolp_value_field, mo, pd):
     mo.stop(
         not all([lolp_date_field.value, lolp_period_field.value, lolp_value_field.value]),
         mo.md("*Pick all three LOLP field mappings above.*"),
@@ -396,20 +360,12 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ### The chart: does this LOLP/margin horizon predict Long vs Short better than demand did?
-    """)
+    mo.md("### The chart: does this LOLP/margin horizon predict Long vs Short better than demand did?")
     return
 
 
 @app.cell
-def _(
-    bin_counts_by_group,
-    grouped_bar_chart,
-    joined_with_lolp_df,
-    lolp_bin_width,
-    mo,
-):
+def _(bin_counts_by_group, grouped_bar_chart, joined_with_lolp_df, lolp_bin_width, mo):
     mo.stop(joined_with_lolp_df.empty, mo.md("*No matched rows to chart yet.*"))
 
     _binned = bin_counts_by_group(
@@ -428,17 +384,7 @@ def _(
 
 
 @app.cell
-def _(
-    datetime,
-    days_to_fetch,
-    fetch,
-    mo,
-    pd,
-    start_date,
-    timedelta,
-    timezone,
-    wind_provider,
-):
+def _(datetime, days_to_fetch, elexon, fetch, mo, pd, start_date, timedelta, timezone, wind_provider):
     mo.stop(not fetch.value, mo.md("*Click Fetch above to also load wind forecast data.*"))
 
     _wind_rows = []
@@ -475,20 +421,22 @@ def _(mo, wind_df):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ### The table: wind forecast added to the existing comparison
+    mo.md(
+        """
+        ### The table: wind forecast added to the existing comparison
 
-    Same join shape as LOLP -- `(day, settlement_period)`, wind's
-    own row already tagged with the fetch-loop day, not a parsed
-    date field. Unlike LOLP, this reuses the *joined_df* from
-    Section 1 directly (demand's classification is unaffected by
-    which of these two later sections you run).
-    """)
+        Same join shape as LOLP -- `(day, settlement_period)`, wind's
+        own row already tagged with the fetch-loop day, not a parsed
+        date field. Unlike LOLP, this reuses the *joined_df* from
+        Section 1 directly (demand's classification is unaffected by
+        which of these two later sections you run).
+        """
+    )
     return
 
 
 @app.cell
-def _(joined_df, mo, wind_df, wind_period_field, wind_value_field):
+def _(joined_df, mo, pd, wind_df, wind_period_field, wind_value_field):
     mo.stop(
         not all([wind_period_field.value, wind_value_field.value]),
         mo.md("*Pick both wind field mappings above.*"),
@@ -514,18 +462,20 @@ def _(joined_df, mo, wind_df, wind_period_field, wind_value_field):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ### The chart that actually answers "volatility": price spread by wind-forecast bucket
+    mo.md(
+        """
+        ### The chart that actually answers "volatility": price spread by wind-forecast bucket
 
-    `spread_by_bin()` -- mean and standard deviation of actual
-    price within each wind-forecast bucket. A bucket where the
-    error bar is visibly wider than the others is where wind
-    forecast is predicting real volatility; a roughly flat set of
-    error bars across buckets means wind forecast level, at least
-    on its own, isn't the thing driving how much prices swing.
-    Sample size is in the hover text -- a wide bar on 2
-    observations is not the same finding as a wide bar on 40.
-    """)
+        `spread_by_bin()` -- mean and standard deviation of actual
+        price within each wind-forecast bucket. A bucket where the
+        error bar is visibly wider than the others is where wind
+        forecast is predicting real volatility; a roughly flat set of
+        error bars across buckets means wind forecast level, at least
+        on its own, isn't the thing driving how much prices swing.
+        Sample size is in the hover text -- a wide bar on 2
+        observations is not the same finding as a wide bar on 40.
+        """
+    )
     return
 
 
@@ -552,29 +502,25 @@ def _(joined_with_wind_df, mo, spread_by_bin, spread_chart, wind_bin_width):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ### The secondary chart: does wind level predict direction too?
+    mo.md(
+        """
+        ### The secondary chart: does wind level predict direction too?
 
-    Not what was asked, but cheap to check given the plumbing
-    already exists -- reuses `bin_counts_by_group()`/
-    `grouped_bar_chart()` exactly as Sections 1 and 2 did. Worth
-    looking at alongside the spread chart above, not instead of
-    it: a variable can predict volatility without predicting
-    direction, and vice versa -- they're genuinely different
-    questions, and it's worth seeing both answers rather than
-    assuming one implies the other.
-    """)
+        Not what was asked, but cheap to check given the plumbing
+        already exists -- reuses `bin_counts_by_group()`/
+        `grouped_bar_chart()` exactly as Sections 1 and 2 did. Worth
+        looking at alongside the spread chart above, not instead of
+        it: a variable can predict volatility without predicting
+        direction, and vice versa -- they're genuinely different
+        questions, and it's worth seeing both answers rather than
+        assuming one implies the other.
+        """
+    )
     return
 
 
 @app.cell
-def _(
-    bin_counts_by_group,
-    grouped_bar_chart,
-    joined_with_wind_df,
-    mo,
-    wind_bin_width,
-):
+def _(bin_counts_by_group, grouped_bar_chart, joined_with_wind_df, mo, wind_bin_width):
     mo.stop(joined_with_wind_df.empty)
 
     _binned = bin_counts_by_group(
