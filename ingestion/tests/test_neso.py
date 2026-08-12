@@ -39,6 +39,34 @@ def test_datastore_search_raises_on_reported_failure(mock_get):
 
 
 @patch("wattstack_ingestion.neso.requests.get")
+def test_datastore_search_passes_through_sort_param(mock_get):
+    mock_get.return_value = _mock_response({"success": True, "result": {"records": [SAMPLE_ROW]}})
+    client = NesoClient()
+    client.datastore_search("some-resource-id", sort="deliveryStart desc")
+    assert mock_get.call_args.kwargs["params"]["sort"] == "deliveryStart desc"
+
+
+@patch("wattstack_ingestion.neso.requests.get")
+def test_datastore_search_omits_sort_param_when_not_given(mock_get):
+    mock_get.return_value = _mock_response({"success": True, "result": {"records": [SAMPLE_ROW]}})
+    client = NesoClient()
+    client.datastore_search("some-resource-id")
+    assert "sort" not in mock_get.call_args.kwargs["params"]
+
+
+@patch("wattstack_ingestion.neso.requests.get")
+def test_datastore_search_caches_separately_per_sort_value(mock_get, tmp_path):
+    from wattstack_ingestion.cache import Cache
+
+    mock_get.return_value = _mock_response({"success": True, "result": {"records": [SAMPLE_ROW]}})
+    client = NesoClient(cache=Cache(tmp_path / "c.sqlite"))
+    client.datastore_search("some-resource-id", sort="deliveryStart desc")
+    client.datastore_search("some-resource-id", sort="deliveryStart desc")  # cached
+    client.datastore_search("some-resource-id")  # no sort -- genuinely different call
+    assert mock_get.call_count == 2
+
+
+@patch("wattstack_ingestion.neso.requests.get")
 def test_response_reserve_results_summary_uses_known_resource_id(mock_get):
     mock_get.return_value = _mock_response({"success": True, "result": {"records": [SAMPLE_ROW]}})
     NesoClient().response_reserve_results_summary()

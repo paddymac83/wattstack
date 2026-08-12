@@ -74,18 +74,63 @@ rather than waiting for every signal to be fully calibrated first.
   whole project has been positioned as a transparent, free alternative
   to -- using their feed would be a deliberate departure from that
   principle, not a quiet substitution, and hasn't been made.
-- **DC**: real historical clearing prices (`response_reserve_results_summary`,
-  already confirmed) -- a simple EFA-block average for v1 pricing, not
-  the inertia/loss-calibrated model from Phase B's exploratory work.
-  That sophistication is a real future upgrade, deliberately deferred,
-  not abandoned.
-- **BM**: no direction signal has held up after three attempts (demand
-  weak, LOLP rejected, wind gives volatility not direction) -- v1
-  doesn't pretend otherwise. Wind-validated volatility sizes how much
-  capacity gets reserved; a flat historical-average price values that
-  reserved capacity; a single conservative derating factor
-  acknowledges "won't always be accepted." Honest about being a
-  placeholder, not a forecast.
+- **DC [x] implemented, one correction confirmed live
+  (`docs/adr/0018`):** real historical clearing prices
+  (`response_reserve_results_summary`, already confirmed) --
+  `NesoDCPriceProvider.reserve_prices()`, a simple EFA-block average
+  for v1 pricing, not the inertia/loss-calibrated model from Phase B's
+  exploratory work. That sophistication is a real future upgrade,
+  deliberately deferred, not abandoned. Two real gaps closed along the
+  way: `NesoClient.datastore_search()` had no `sort` parameter (added,
+  backward compatible -- without it, a plain `limit=N` fetch against
+  nearly three years of data has no guaranteed relationship to
+  recency), and DC's per-EFA-block granularity needed broadcasting
+  each block's average across the 8 settlement periods it covers, via
+  a new `efa_block_number_for_hour()` (proven to genuinely be the
+  inverse of the existing `efa_block_label_for_index()`). Covers only
+  `reserve_prices()` for DC-High/DC-Low -- raises for any other
+  market. **Correction, confirmed live:** the field distinguishing
+  DC-High/DC-Low is `auctionProduct` (`DCH`/`DCL`), not `serviceType`
+  as first guessed -- `serviceType` is real but holds an unrelated
+  category ("Response", "Slow Reserve"); the original guess would have
+  matched nothing. The now-unused `service_type_field` parameter was
+  removed rather than left in place doing nothing.
+- **BM [x] implemented (`docs/adr/0019`):** BM is genuinely harder than
+  wholesale or DC -- pay-as-bid, not pay-as-clear, so there's no
+  single "the BM price" to average toward, unlike MID or DC's
+  clearing price. `MarketSpec`'s own docstring already states BM's
+  price needs to be "an expected-value proxy... already probability-
+  weighted." `ElexonBMPriceProvider.reserve_prices()` averages
+  *submitted* price levels (BOD, confirmed price-bearing per ADR
+  0006 -- BOALF carries volume/timing, not price) across all BM
+  units, multiplied by a stated, conservative, uncalibrated
+  `acceptance_derating` (default 0.3) -- honest about being an
+  approximation of an approximation, not dressed up as more than it
+  is. Real acceptance-rate calibration (BOD+BOALF joined) remains
+  the deliberately-deferred acceptance-risk work already on this
+  roadmap. No `verify_schema()`-equivalent built for BOD specifically
+  yet -- field name defaults (`offerPrice`, `bidPrice`) are unchecked
+  guesses, an honest gap, not silently assumed correct.
+- **`CombinedPriceProvider` redesigned** to route across multiple
+  reserve providers (`reserve_providers`, plural -- a breaking change
+  from its first version, made before any real caller depended on the
+  old shape): tries each provider in turn, catching the `ValueError`
+  each one already raises for markets it doesn't cover. Composes
+  wholesale + DC + BM into one object satisfying core's full
+  `PriceProvider` protocol -- ready for a real three-market stacked
+  test run, the actual target this whole fast-path plan was aimed at.
+- **Confirmed directly from `optimizer.py`/`markets.py`'s own source,
+  not memory, while answering a question about the registry:**
+  `Market.WHOLESALE` is deliberately absent from `MARKET_REGISTRY` --
+  the registry only ever held reserve-style capacity commitments (a
+  direction, a delivery duration); wholesale is the underlying
+  charge/discharge decision the battery always has available, not a
+  capacity reservation. `optimize_day()` treats them as genuinely
+  different: `active_reserve = [m for m in markets if m in
+  MARKET_REGISTRY]` (registry-driven) vs `wholesale_active =
+  Market.WHOLESALE in markets` (a direct enum check). Not a gap in
+  the registry -- the intended design, already stated in
+  `markets.py`'s own module docstring.
 - **Imperfect price capture / acceptance risk**: folded into one
   mechanism for v1, not a research program -- a single configurable
   derating parameter applied to DC and BM reserve revenue
@@ -473,3 +518,23 @@ Don't duplicate these here:
   First real `PriceProvider`-compatible implementation in this project
   (`ingestion/wattstack_ingestion/prices.py`); implements only
   `wholesale_prices()` so far.
+- `docs/adr/0018` -- DC price via seasonal average by EFA block,
+  mirroring wholesale's approach. `NesoDCPriceProvider.reserve_prices()`
+  for DC-High/DC-Low only, dispatching on `market.name` rather than
+  importing `core.markets.Market` (ADR 0009's rule). Two real gaps
+  closed before building it: `datastore_search()` gained a `sort`
+  parameter (without it, "most recent limit rows" isn't a safe
+  assumption against nearly three years of data), and a new
+  `efa_block_number_for_hour()` broadcasts each EFA block's average
+  across its 8 settlement periods. Unlike wholesale, not yet checked
+  against a real response -- field names are reasoned guesses,
+  correctable via constructor parameters.
+- `docs/adr/0019` -- BM price via a derated seasonal average of
+  submitted BOD price levels, the last of the three fast-path
+  providers. Genuinely harder than wholesale/DC (pay-as-bid, no
+  single clearing price) -- `MarketSpec` already states BM's price
+  needs to be an expected-value proxy, and `acceptance_derating`
+  (0.3, stated as uncalibrated) is that proxy's mechanism.
+  `CombinedPriceProvider` redesigned to route across multiple reserve
+  providers by market, a breaking change made deliberately before any
+  real caller depended on the old singular-provider shape.

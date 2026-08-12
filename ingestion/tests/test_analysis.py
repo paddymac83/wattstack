@@ -8,6 +8,7 @@ from wattstack_ingestion.analysis import (
     direction_from_sign,
     efa_block_label,
     efa_block_label_for_index,
+    efa_block_number_for_hour,
     filter_battery_bmu_ids,
     filter_bmus_by_id_pattern,
     fuel_type_lookup,
@@ -409,6 +410,33 @@ def test_efa_block_label_for_index_rejects_out_of_range():
         efa_block_label_for_index(0)
     with pytest.raises(ValueError):
         efa_block_label_for_index(7)
+
+
+# --- efa_block_number_for_hour ---
+
+
+def test_efa_block_number_for_hour_is_the_genuine_inverse_of_efa_block_label_for_index():
+    """For every hour, the block number this returns should map back
+    (via efa_block_label_for_index) to the same label
+    efa_block_label() would give directly -- confirms these three
+    functions agree with each other, not just individually correct."""
+    for hour in range(24):
+        block_number = efa_block_number_for_hour(hour)
+        assert efa_block_label_for_index(block_number) == efa_block_label(hour)
+
+
+def test_efa_block_number_for_hour_handles_the_wraparound_block():
+    assert efa_block_number_for_hour(23) == 1
+    assert efa_block_number_for_hour(0) == 1
+    assert efa_block_number_for_hour(2) == 1
+    assert efa_block_number_for_hour(3) == 2
+
+
+def test_efa_block_number_for_hour_rejects_invalid_hour():
+    with pytest.raises(ValueError):
+        efa_block_number_for_hour(24)
+    with pytest.raises(ValueError):
+        efa_block_number_for_hour(-1)
 
 
 # --- direction_from_sign ---

@@ -373,6 +373,31 @@ def efa_block_label_for_index(efa_number: int) -> str:
     return f"{start_hour:02d}:00-{end_hour:02d}:00"
 
 
+def efa_block_number_for_hour(hour: int) -> int:
+    """Which of GB's 6 standard EFA blocks (1-6) a given hour (0-23)
+    falls in -- the inverse of efa_block_label_for_index(). Needed
+    when a dataset gives a delivery timestamp rather than an EFA block
+    number or label directly (e.g. DC auction results, confirmed to
+    use deliveryStart/deliveryEnd timestamps rather than the
+    EFA1..EFA6 wide-column shape the DC requirements CSV used).
+
+    Same confirmed block boundaries as efa_block_label()/EFA_BLOCKS --
+    this just returns the 1-6 number instead of the "HH:MM-HH:MM"
+    label, for callers that want to bucket/aggregate by block number
+    directly (e.g. as the period argument to seasonal_average_by_period()).
+    """
+    if not (0 <= hour <= 23):
+        raise ValueError(f"hour must be 0-23, got {hour}")
+    for i, (start_hour, end_hour) in enumerate(EFA_BLOCKS, start=1):
+        if start_hour < end_hour:
+            if start_hour <= hour < end_hour:
+                return i
+        else:  # wraps past midnight (the 23:00-03:00 block)
+            if hour >= start_hour or hour < end_hour:
+                return i
+    raise ValueError(f"hour must be 0-23, got {hour}")  # pragma: no cover -- unreachable, blocks cover all 24 hours
+
+
 def direction_from_sign(value: float) -> str:
     """Classify a signed flow value as "Import" (positive) or
     "Export" (negative) -- the sign convention believed to apply to

@@ -36,12 +36,12 @@ class Market(str, Enum):
     # Not yet in MARKET_REGISTRY -- defined so Scenario configs and
     # historical data can reference them; real future work per
     # ROADMAP.md's backlog (reserve services alongside response).
-    DYNAMIC_REGULATION = "dynamic_regulation"
-    DYNAMIC_MODERATION = "dynamic_moderation"
+    # DYNAMIC_REGULATION = "dynamic_regulation"
+    # DYNAMIC_MODERATION = "dynamic_moderation"
     # Not a dispatch decision -- Capacity Market is a duration-derated
     # annual availability payment. See docs/adr/0002 and results.py.
     # Never in MARKET_REGISTRY; optimizer.py ignores it.
-    CAPACITY_MARKET = "capacity_market"
+    # CAPACITY_MARKET = "capacity_market"
 
 
 @dataclass(frozen=True)

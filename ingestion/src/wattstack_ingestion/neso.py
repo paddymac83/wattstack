@@ -128,18 +128,29 @@ class NesoClient:
         self.cache = cache
         self.timeout = timeout
 
-    def datastore_search(self, resource_id: str, limit: int = 1000, offset: int = 0) -> list[dict]:
-        cache_key = f"neso:datastore_search:{resource_id}:{limit}:{offset}"
+    def datastore_search(
+        self, resource_id: str, limit: int = 1000, offset: int = 0, sort: str | None = None
+    ) -> list[dict]:
+        """`sort` uses CKAN's own syntax directly, e.g. "deliveryStart desc"
+        -- a real, standard CKAN datastore_search parameter, not
+        previously used anywhere in this module. Matters more than it
+        might look: without an explicit sort, a plain limit=N fetch
+        against a large, continuously-growing dataset has no
+        guaranteed relationship to recency -- could just as easily
+        return the oldest N records as the newest, depending on the
+        database's internal ordering. Pass sort explicitly whenever
+        "the most recent N records" is actually what's wanted.
+        """
+        cache_key = f"neso:datastore_search:{resource_id}:{limit}:{offset}:{sort}"
         if self.cache is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 return cached
 
-        response = requests.get(
-            f"{BASE_URL}/datastore_search",
-            params={"resource_id": resource_id, "limit": limit, "offset": offset},
-            timeout=self.timeout,
-        )
+        params = {"resource_id": resource_id, "limit": limit, "offset": offset}
+        if sort is not None:
+            params["sort"] = sort
+        response = requests.get(f"{BASE_URL}/datastore_search", params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
         if not payload.get("success"):
