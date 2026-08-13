@@ -284,8 +284,8 @@ class ElexonBMPriceProvider:
         client: ElexonClient | None = None,
         lookback_days: int = 7,
         period_field: str = "settlementPeriod",
-        offer_price_field: str = "offerPrice",
-        bid_price_field: str = "bidPrice",
+        offer_price_field: str = "offer",
+        bid_price_field: str = "bid",
         acceptance_derating: float = 0.3,
     ):
         self.client = client or ElexonClient()
