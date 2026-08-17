@@ -7,10 +7,18 @@ it to core.optimize_day() in place of SyntheticPriceProvider.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import statistics
+from datetime import date, datetime, timedelta, timezone
 
-from wattstack_ingestion.analysis import efa_block_number_for_hour, seasonal_average_by_period
+from wattstack_ingestion.analysis import (
+    bucket_start_for_value,
+    classify_system_length,
+    efa_block_number_for_hour,
+    probability_by_bin,
+    seasonal_average_by_period,
+)
 from wattstack_ingestion.elexon import ElexonClient
+from wattstack_ingestion.forecasts import ElexonDemandForecastProvider
 from wattstack_ingestion.neso import KNOWN_RESOURCES, NesoClient
 
 
@@ -284,8 +292,8 @@ class ElexonBMPriceProvider:
         client: ElexonClient | None = None,
         lookback_days: int = 7,
         period_field: str = "settlementPeriod",
-        offer_price_field: str = "offer",
-        bid_price_field: str = "bid",
+        offer_price_field: str = "offerPrice",
+        bid_price_field: str = "bidPrice",
         acceptance_derating: float = 0.3,
     ):
         self.client = client or ElexonClient()
@@ -319,6 +327,170 @@ class ElexonBMPriceProvider:
 
         averages = seasonal_average_by_period(rows, period_field=self.period_field, value_field=price_field)
         return [averages.get(period, 0.0) * self.acceptance_derating for period in range(1, 49)]
+
+
+class ElexonImbalancePriceProvider:
+    """reserve_prices() for BM-Offer and BM-Bid, built from a genuine
+    predictive model -- a demand-probability-weighted mixture of
+    conditional System Price distributions. Built from two real
+    sources (Timera Energy's "the risk is in the distribution, not
+    the mean"; Browell & Gilbert, Energies 2022) and validated in
+    `notebooks/imbalance_price_probabilistic_forecast.py` before being
+    promoted here -- see `docs/adr/0020`, `docs/adr/0021`.
+
+    Supersedes `ElexonBMPriceProvider`'s approach: targets System
+    Price directly (the real imbalance settlement price, derived from
+    the marginal action actually taken to balance the system), not
+    submitted BOD price levels. `ElexonBMPriceProvider` is kept in
+    this module, not deleted -- a known, tested alternative, no longer
+    the recommended default.
+
+    Validated against real GB data (60-day training window, 12-day
+    chronological holdout): 2.3% MAE improvement over the flat
+    seasonal-average baseline -- close to Browell & Gilbert's own
+    published 3% day-ahead result, a genuine match to peer-reviewed
+    literature on real data, not just a synthetic demonstration.
+
+    No shrinkage applied, deliberately. The original bad real-data
+    result (£22.22/MWh MAE, worse than the £5.67/MWh flat baseline)
+    was diagnosed as a training window that was far too small (1-2
+    days) -- once trained on a realistic amount of real data, the raw
+    empirical `probability_by_bin()` performed best; shrinkage wasn't
+    the actual fix, more data was. `shrink_probability_by_bin()`
+    remains available in `analysis.py` for anyone using a much
+    shorter lookback in the future, but isn't used here.
+
+    Real, principled asymmetry between the two markets, not a shared
+    blended forecast: `BM_OFFER` (discharge) is only genuinely valuable
+    when the system is Short (NESO needs more generation, not less);
+    `BM_BID` (charge) only when Long. Each market's forecast is
+    `P(its own regime) x mean price in that regime` -- e.g. `BM_OFFER`
+    gets `P(Short) x mean_price_given_short`, with an implicit ~0
+    contribution from Long periods, since discharge capacity held
+    during a Long period generally isn't what NESO is calling for.
+    This is a real economic modelling choice, not just a statistical
+    convenience -- worth revisiting if real acceptance data later
+    shows meaningful off-regime value for either market, but not
+    assumed here without evidence.
+
+    Real cost consideration: training needs `lookback_days` days of
+    BOTH demand-forecast history (one call each, via
+    `ElexonDemandForecastProvider.as_of()`) AND system prices (one
+    call each, via `system_prices()`) -- roughly `2 * lookback_days`
+    requests per `reserve_prices()` call, before caching. The default
+    (60 days, matching what was validated) costs ~120 requests.
+
+    Field names default to what was validated against real data in
+    the notebook (`settlementPeriod`, `netImbalanceVolume`) but
+    `price_field` (`systemSellPrice`) and `demand_field` (`demand`)
+    are still constructor-parameter guesses for anyone whose real
+    response shapes differ -- correctable without a code change.
+    """
+
+    def __init__(
+        self,
+        client: ElexonClient | None = None,
+        forecast_provider: ElexonDemandForecastProvider | None = None,
+        lookback_days: int = 60,
+        demand_bin_width: float = 1000.0,
+        period_field: str = "settlementPeriod",
+        demand_field: str = "transmissionSystemDemand",
+        price_field: str = "systemSellPrice",
+        niv_field: str = "netImbalanceVolume",
+    ):
+        self.client = client or ElexonClient()
+        self.forecast_provider = forecast_provider or ElexonDemandForecastProvider(client=self.client)
+        self.lookback_days = lookback_days
+        self.demand_bin_width = demand_bin_width
+        self.period_field = period_field
+        self.demand_field = demand_field
+        self.price_field = price_field
+        self.niv_field = niv_field
+
+    def _trigger_time(self, target_day: date) -> datetime:
+        """10:00 UTC the day before `target_day` -- the same
+        day-ahead trigger convention used throughout this project
+        (ADR 0009), not reinvented here."""
+        return datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc) - timedelta(hours=14)
+
+    def reserve_prices(self, day: date, market) -> list[float]:
+        """48 half-hourly prices for `day` and `market` -- BM-Offer or
+        BM-Bid only. Raises ValueError for any other market rather
+        than silently returning something wrong.
+
+        Each market gets its own regime-specific forecast, not a
+        shared blend: `P(Short) x mean_price_given_short` for
+        `BM_OFFER`, `P(Long) x mean_price_given_long` for `BM_BID` --
+        see the class docstring for the economic reasoning. Both
+        markets share the same trained P(Short|bucket) table and
+        conditional means; only the final per-market formula differs.
+
+        Structural, not an import of core.markets.Market (ADR 0009),
+        same pattern as every other reserve provider here -- dispatches
+        on `market.name`.
+        """
+        market_name = getattr(market, "name", str(market))
+        if market_name not in ("BM_OFFER", "BM_BID"):
+            raise ValueError(f"ElexonImbalancePriceProvider only covers BM_OFFER/BM_BID, got {market_name!r}")
+
+        # 1. Fetch and join a lookback_days window of (forecast demand, realised price, system length).
+        joined: list[dict] = []
+        for offset in range(1, self.lookback_days + 1):
+            history_day = day - timedelta(days=offset)
+            demand_rows = self.forecast_provider.as_of(self._trigger_time(history_day))
+            price_rows = {r.get(self.period_field): r for r in self.client.system_prices(history_day)}
+
+            for demand_row in demand_rows:
+                price_row = price_rows.get(demand_row.get(self.period_field))
+                if price_row is None:
+                    continue
+
+                demand = demand_row.get(self.demand_field)
+                price = price_row.get(self.price_field)
+                niv = price_row.get(self.niv_field)
+                if demand is None or price is None or niv is None:
+                    continue
+                joined.append({
+                    "demand": float(demand), "price": float(price),
+                    "system_length": classify_system_length(float(niv)),
+                })
+
+        # 2. Train: P(Short|demand bucket), and mean price conditional on system length.
+        probability_table = probability_by_bin(
+            [r["demand"] for r in joined], [r["system_length"] for r in joined], bin_width=self.demand_bin_width
+        )
+        short_prices = [r["price"] for r in joined if r["system_length"] == "Short"]
+        long_prices = [r["price"] for r in joined if r["system_length"] == "Long"]
+        mean_short = statistics.mean(short_prices) if short_prices else None
+        mean_long = statistics.mean(long_prices) if long_prices else None
+        # overall (non-bucket-specific) rate -- the fallback when a period's own demand
+        # bucket has no training data, so the fallback still respects the same per-market
+        # asymmetry rather than reverting to an undifferentiated blend.
+        overall_p_short = len(short_prices) / len(joined) if joined else 0.0
+        overall_p_long = 1.0 - overall_p_short if joined else 0.0
+
+        # 3. Predict: the target day's own forecast demand, per period.
+        target_demand_rows = self.forecast_provider.as_of(self._trigger_time(day))
+        target_demand_by_period = {r.get(self.period_field): r.get(self.demand_field) for r in target_demand_rows}
+        available_buckets = list(probability_table.keys())
+
+        result = []
+        for period in range(1, 49):
+            demand = target_demand_by_period.get(period)
+            bucket = bucket_start_for_value(float(demand), self.demand_bin_width, available_buckets) if demand is not None else None
+            if bucket is not None:
+                probs = probability_table[bucket]
+                p_short = probs.get("Short", 0.0)
+                p_long = probs.get("Long", 0.0)
+            else:
+                p_short, p_long = overall_p_short, overall_p_long
+
+            if market_name == "BM_OFFER":
+                forecast = p_short * mean_short if mean_short is not None else 0.0
+            else:  # BM_BID
+                forecast = p_long * mean_long if mean_long is not None else 0.0
+            result.append(forecast)
+        return result
 
 
 class CombinedPriceProvider:

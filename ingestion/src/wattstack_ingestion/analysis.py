@@ -485,3 +485,123 @@ def seasonal_average_by_period(
         buckets[int(period)].append(value)
 
     return {period: statistics.mean(values) for period, values in buckets.items()}
+
+
+def probability_by_bin(bin_values: list[float], group_values: list[str], bin_width: float) -> dict:
+    """Empirical P(group | value falls in this bucket) -- e.g. P(Short
+    | forecast demand in [28000, 29000)) -- estimated from real
+    historical (bin_value, group) pairs. Built for exactly one
+    situation: converting a forecast input (demand, wind, etc.) into a
+    genuine probability of system length, the way Browell & Gilbert
+    (Energies 2022) describe for day-ahead imbalance price forecasting
+    -- not a classification, a probability, since the downstream use
+    is a probability-weighted mixture of conditional price
+    distributions.
+
+    Reuses bin_counts_by_group()'s own bucket definition (same
+    flooring/rounding), so the two stay consistent by construction --
+    this isn't a reimplementation of the bucketing logic, just a
+    normalisation of its output into probabilities.
+
+    Returns {bin_start: {group: probability}} -- keyed by each
+    bucket's NUMERIC start (not a display label), specifically so a
+    new value can be looked up via bucket_start_for_value() without
+    re-deriving bucket boundaries by hand. A bucket with zero observed
+    rows is omitted entirely, not returned with undefined
+    probabilities.
+    """
+    if not bin_values:
+        return {}
+
+    counts = bin_counts_by_group(bin_values, group_values, bin_width)
+    lo = math.floor(min(bin_values) / bin_width) * bin_width
+
+    result = {}
+    for i in range(len(counts["bin_labels"])):
+        bin_start = lo + i * bin_width
+        total = sum(counts["counts"][g][i] for g in counts["groups"])
+        if total == 0:
+            continue
+        result[bin_start] = {g: counts["counts"][g][i] / total for g in counts["groups"]}
+    return result
+
+
+def shrink_probability_by_bin(
+    bin_values: list[float], group_values: list[str], bin_width: float, shrinkage_strength: float = 10.0
+) -> dict:
+    """Empirical P(group | bucket), shrunk toward the overall
+    (unconditional) rate for buckets with few observations -- a
+    direct, principled fix for a real failure mode found in practice,
+    not a hypothetical one: probability_by_bin()'s raw empirical
+    frequency can be extremely noisy for a thin bucket (2
+    observations happening to both be "Short" gives 100%, purely by
+    chance), and a mixture model built on an overconfident, noisy
+    probability can be WORSE than not using the probability at all --
+    confidently wrong costs more than an honest average when the
+    underlying classifier is unreliable. This is exactly what
+    happened when demand-bucket probability was used raw in
+    notebooks/imbalance_price_probabilistic_forecast.py: a mixture
+    MAE dramatically worse than the flat baseline.
+
+    `shrinkage_strength` (k) is a pseudo-count: a bucket's estimate is
+    pulled toward the unconditional rate as if k additional
+    observations at that rate had already been seen. A bucket with
+    many real observations is barely affected (its own data
+    dominates); a bucket with few is pulled strongly toward the
+    population average. k=0 recovers probability_by_bin()'s raw
+    frequency exactly. The right value for k is itself an empirical
+    question -- this is a starting point to tune against a real
+    backtest, not a calibrated final answer.
+
+    Returns {bin_start: {group: probability}}, the identical shape to
+    probability_by_bin() -- a drop-in replacement, not a different
+    interface to learn.
+    """
+    if not bin_values:
+        return {}
+
+    counts = bin_counts_by_group(bin_values, group_values, bin_width)
+    lo = math.floor(min(bin_values) / bin_width) * bin_width
+
+    overall_totals = {g: sum(counts["counts"][g]) for g in counts["groups"]}
+    overall_total = sum(overall_totals.values())
+    unconditional_rate = {
+        g: (overall_totals[g] / overall_total if overall_total else 0.0) for g in counts["groups"]
+    }
+
+    result = {}
+    for i in range(len(counts["bin_labels"])):
+        bin_start = lo + i * bin_width
+        bucket_counts = {g: counts["counts"][g][i] for g in counts["groups"]}
+        bucket_total = sum(bucket_counts.values())
+        if bucket_total == 0:
+            continue
+        result[bin_start] = {
+            g: (bucket_counts[g] + shrinkage_strength * unconditional_rate[g]) / (bucket_total + shrinkage_strength)
+            for g in counts["groups"]
+        }
+    return result
+
+
+def bucket_start_for_value(value: float, bin_width: float, available_bucket_starts) -> float | None:
+    """Which trained bucket (matching probability_by_bin()'s keys) a
+    new value falls into -- e.g. tomorrow's forecast demand, looked up
+    against a probability table built from historical data.
+
+    Falls back to the NEAREST available bucket (by numeric distance)
+    if the value's own raw bucket wasn't present in training data --
+    tomorrow's forecast can genuinely fall outside the range a
+    training window happened to cover; returning nothing useful in
+    that case would silently break the downstream forecast rather
+    than degrading gracefully to the closest evidence available.
+
+    Returns None only if available_bucket_starts is empty -- there's
+    nothing to fall back to.
+    """
+    available_bucket_starts = list(available_bucket_starts)
+    if not available_bucket_starts:
+        return None
+    raw_start = math.floor(value / bin_width) * bin_width
+    if raw_start in available_bucket_starts:
+        return raw_start
+    return min(available_bucket_starts, key=lambda b: abs(b - raw_start))

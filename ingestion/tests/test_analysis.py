@@ -4,6 +4,7 @@ from wattstack_ingestion.analysis import (
     aggregate_volume_by_day_and_category,
     bid_volume,
     bin_counts_by_group,
+    bucket_start_for_value,
     classify_system_length,
     direction_from_sign,
     efa_block_label,
@@ -17,7 +18,9 @@ from wattstack_ingestion.analysis import (
     marginal_bid_share,
     offer_volume,
     price_lookup_by_bmu_period,
+    probability_by_bin,
     seasonal_average_by_period,
+    shrink_probability_by_bin,
     spread_by_bin,
 )
 
@@ -528,3 +531,126 @@ def test_seasonal_average_by_period_skips_rows_missing_period_or_value():
     rows = [{"settlementPeriod": None, "price": 999}, {"settlementPeriod": 1, "price": None}, {"settlementPeriod": 1, "price": 50.0}]
     result = seasonal_average_by_period(rows, period_field="settlementPeriod", value_field="price")
     assert result == {1: 50.0}
+
+
+# --- probability_by_bin ---
+
+
+def test_probability_by_bin_computes_correct_empirical_probabilities():
+    # bin 28000-29000: 3 Short, 1 Long -> P(Short)=0.75, P(Long)=0.25
+    bin_values = [28100, 28200, 28300, 28400]
+    group_values = ["Short", "Short", "Short", "Long"]
+    result = probability_by_bin(bin_values, group_values, bin_width=1000.0)
+    bucket = result[28000.0]
+    assert bucket["Short"] == 0.75
+    assert bucket["Long"] == 0.25
+
+
+def test_probability_by_bin_probabilities_sum_to_one_per_bucket():
+    bin_values = [1.0, 2.0, 3.0, 11.0, 12.0]
+    group_values = ["A", "B", "A", "B", "B"]
+    result = probability_by_bin(bin_values, group_values, bin_width=10.0)
+    for bucket in result.values():
+        assert abs(sum(bucket.values()) - 1.0) < 1e-9
+
+
+def test_probability_by_bin_omits_buckets_with_zero_observations():
+    """bin_counts_by_group() would report a zero-count bucket for any
+    gap between the min and max -- probability_by_bin() must not
+    return that bucket with an undefined (0/0) probability."""
+    bin_values = [1.0, 31.0]  # a big gap -- middle buckets have no data
+    group_values = ["A", "B"]
+    result = probability_by_bin(bin_values, group_values, bin_width=10.0)
+    assert 10.0 not in result  # the empty middle bucket is absent, not present with garbage
+
+
+def test_probability_by_bin_handles_empty_input():
+    assert probability_by_bin([], [], bin_width=10.0) == {}
+
+
+# --- shrink_probability_by_bin ---
+
+
+def test_shrink_probability_by_bin_barely_moves_a_well_populated_bucket():
+    """A bucket with many real observations should be dominated by
+    its own data -- shrinkage should have only a small effect, not
+    override a genuine, well-supported signal."""
+    # 100 observations, 90 Short -- a strong, well-supported 90% rate
+    bin_values = [5.0] * 100
+    group_values = ["Short"] * 90 + ["Long"] * 10
+    raw = probability_by_bin(bin_values, group_values, bin_width=10.0)
+    shrunk = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0, shrinkage_strength=10.0)
+    assert abs(raw[0.0]["Short"] - shrunk[0.0]["Short"]) < 0.1  # close, not identical, but not wildly different
+
+
+def test_shrink_probability_by_bin_pulls_a_thin_bucket_strongly_toward_the_overall_rate():
+    """The actual point of this function: a bucket with only 2
+    observations showing 100% Short by chance must NOT be trusted at
+    face value -- it should be pulled substantially toward the
+    dataset's overall rate."""
+    # overall dataset: mostly Long (80%), except one thin bucket that happens to be 100% Short
+    bin_values = [5.0, 5.0] + [50.0] * 20  # bucket 0-10: 2 obs; bucket 50-60: 20 obs
+    group_values = ["Short", "Short"] + ["Long"] * 16 + ["Short"] * 4  # thin bucket: 100% Short; big bucket: 80% Long
+    shrunk = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0, shrinkage_strength=10.0)
+    # the thin bucket's raw rate (100% Short) should be pulled well below 100% once shrunk
+    assert shrunk[0.0]["Short"] < 0.7
+
+
+def test_shrink_probability_by_bin_zero_strength_matches_the_raw_frequency_exactly():
+    bin_values = [5.0, 6.0, 7.0]
+    group_values = ["Short", "Short", "Long"]
+    raw = probability_by_bin(bin_values, group_values, bin_width=10.0)
+    shrunk = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0, shrinkage_strength=0.0)
+    assert raw[0.0]["Short"] == shrunk[0.0]["Short"]
+
+
+def test_shrink_probability_by_bin_converges_to_the_unconditional_rate_as_strength_grows_large():
+    """The actual mathematically-guaranteed property of shrinkage,
+    unlike monotonic improvement on any single backtest (which is
+    NOT guaranteed -- small test sets can make an unshrunk estimator
+    look good by chance): as shrinkage_strength -> infinity, every
+    bucket's estimate converges to exactly the dataset's overall rate,
+    regardless of that bucket's own (possibly noisy) data."""
+    # a thin bucket with a misleadingly extreme raw rate (100% Short)
+    bin_values = [5.0, 5.0] + [50.0] * 20
+    group_values = ["Short", "Short"] + ["Long"] * 16 + ["Short"] * 4  # overall rate: 6/22 Short = ~27.3%
+    huge_strength = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0, shrinkage_strength=1_000_000.0)
+    assert abs(huge_strength[0.0]["Short"] - 6 / 22) < 1e-4
+
+
+def test_shrink_probability_by_bin_probabilities_still_sum_to_one():
+    bin_values = [1.0, 2.0, 11.0, 12.0, 13.0]
+    group_values = ["A", "B", "A", "A", "B"]
+    result = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0, shrinkage_strength=5.0)
+    for bucket in result.values():
+        assert abs(sum(bucket.values()) - 1.0) < 1e-9
+
+
+def test_shrink_probability_by_bin_handles_empty_input():
+    assert shrink_probability_by_bin([], [], bin_width=10.0) == {}
+
+
+def test_shrink_probability_by_bin_omits_buckets_with_zero_observations():
+    bin_values = [1.0, 31.0]
+    group_values = ["A", "B"]
+    result = shrink_probability_by_bin(bin_values, group_values, bin_width=10.0)
+    assert 10.0 not in result
+
+
+# --- bucket_start_for_value ---
+
+
+def test_bucket_start_for_value_finds_the_exact_bucket():
+    assert bucket_start_for_value(28300, bin_width=1000.0, available_bucket_starts=[27000.0, 28000.0, 29000.0]) == 28000.0
+
+
+def test_bucket_start_for_value_falls_back_to_nearest_when_value_out_of_training_range():
+    """Tomorrow's forecast can genuinely fall outside the training
+    window's observed range -- must degrade to the closest available
+    evidence, not return nothing."""
+    result = bucket_start_for_value(50000, bin_width=1000.0, available_bucket_starts=[27000.0, 28000.0, 29000.0])
+    assert result == 29000.0  # the nearest bucket to a value far above anything trained on
+
+
+def test_bucket_start_for_value_returns_none_for_empty_training_data():
+    assert bucket_start_for_value(28300, bin_width=1000.0, available_bucket_starts=[]) is None

@@ -144,6 +144,89 @@ rather than waiting for every signal to be fully calibrated first.
   shape. This is real `PriceProvider` wiring plus one derating
   parameter, not new optimization logic.
 
+**v2 pivot, 2026-08-09: from seasonal averages to real predictive
+models, starting with BM/imbalance.** All three fast-path providers
+(wholesale, DC, BM) are seasonal averages, not forecasts -- honest
+baselines, deliberately simple. First real predictive-modelling
+effort: `docs/adr/0020`, built from two real sources (Timera Energy's
+"the risk is in the distribution, not the mean"; Browell & Gilbert's
+Energies 2022 paper on imbalance price forecasting), targeting System
+Price directly rather than `ElexonBMPriceProvider`'s BOD average.
+`notebooks/imbalance_price_probabilistic_forecast.py` implements a
+demand-probability-weighted mixture of conditional price
+distributions, validated with a genuine chronological train/test
+split and a real backtest against the flat baseline. Honest
+expectation, stated directly from the paper's own result: day-ahead
+imbalance forecasting is hard even in the published literature (3%
+MAE improvement over climatology), so a modest, measurable improvement
+is the real target, not a large leap.
+
+**Real negative result, confirmed live, same day:** the first version,
+run against real GB data, gave a mixture MAE of £22.22/MWh against a
+£5.67/MWh flat baseline -- nearly 4x worse, not a modest miss.
+Diagnosed, not dismissed: raw empirical probabilities from thin demand
+buckets (a handful of observations showing an extreme rate by chance)
+made the mixture model confidently wrong, which costs more than being
+honestly uncertain. Fixed with `shrink_probability_by_bin()` (new) --
+pulls thin-bucket estimates toward the overall rate; proven on
+realistic noisy synthetic data to correctly convert an actively
+harmful result (-9.5%) into an essentially neutral one (-0.7%) when
+the underlying signal is genuinely weak. A shrinkage-strength sweep
+was added to the notebook (`[0, 1, 2, 5, 10, 20, 50, 100]` tried
+automatically against the same backtest), so finding a workable value
+against real data takes one run instead of manually adjusting a
+slider repeatedly. **Not yet re-run against the same real data that
+produced the original bad result** -- that's still the immediate next
+step, not this fix's own validation, which has only used synthetic
+data so far. Wind's already-validated volatility signal still isn't
+used in this architecture at all -- a real, named gap, separate from
+the shrinkage fix.
+
+**Two real test-methodology bugs found while building the sweep's own
+tests, both worth carrying forward as standing lessons:** (1) a test
+built on `hash(day)` for pseudo-random-looking mock data was silently
+non-deterministic -- Python randomises string hash values per process
+by default, so the test's pass/fail depended on which random seed
+happened to be active, not on the logic being tested. Fixed with
+`date.toordinal()`, confirmed stable across repeated runs with fresh
+random seeds. (2) even once deterministic, the test's own claim was
+wrong -- strict monotonic improvement from more shrinkage isn't
+something shrinkage actually guarantees on any single backtest; what's
+genuinely guaranteed is convergence to the unconditional rate as
+strength grows large, now tested directly against the function itself
+instead of asserted incorrectly through a notebook-level backtest.
+
+**Promoted to production, `docs/adr/0021`, correcting the shrinkage
+diagnosis rather than confirming it:** re-run with a realistic 60-day
+training window (not the original 1-2 days) and a 12-day chronological
+holdout, the unshrunk mixture model achieved a real **2.3% MAE
+improvement** over the flat baseline -- close to Browell & Gilbert's
+own published 3% day-ahead result, a genuine match to peer-reviewed
+literature on real GB data. The actual root cause of the original bad
+result was too little training data, not overconfidence from thin
+buckets -- shrinkage was a real fix for a real (demonstrated)
+failure mode, just not the one that actually occurred here.
+`ElexonImbalancePriceProvider` (`prices.py`) targets `BM_OFFER`/
+`BM_BID` directly, no shrinkage applied, `ElexonBMPriceProvider`
+(BOD-average) kept in the module as a known alternative but no longer
+the recommended default. First genuinely predictive (not
+seasonal-average) price provider reaching `optimizer.py` in this
+project.
+
+**Asymmetric BM_OFFER/BM_BID pricing, `docs/adr/0022`:** the two
+markets no longer receive the same blended forecast for a given
+period. `BM_OFFER` (discharge, valuable when Short) now gets
+`P(Short) x mean_price_given_short`; `BM_BID` (charge, valuable when
+Long) gets `P(Long) x mean_price_given_long` -- an implicit ~0
+contribution from each market's "wrong" regime, a real economic
+modelling choice rather than a statistical convenience, stated as such
+and open to revision if real acceptance data later supports partial
+off-regime value. The fallback path was upgraded alongside the main
+one: a period with missing target-day demand now falls back to the
+dataset's overall Short/Long rate through the same per-market formula,
+not a flat blend that would have silently reintroduced the problem
+this change removes.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -538,3 +621,39 @@ Don't duplicate these here:
   `CombinedPriceProvider` redesigned to route across multiple reserve
   providers by market, a breaking change made deliberately before any
   real caller depended on the old singular-provider shape.
+- `docs/adr/0020` -- probabilistic imbalance price forecast, the first
+  genuine predictive model in this project (vs. the seasonal averages
+  in 0017-0019). Built from two real sources (Timera Energy, Browell
+  & Gilbert 2022), targets System Price directly rather than BOD.
+  Demand-probability-weighted mixture of conditional price
+  distributions, validated with a chronological train/test split.
+  Real result against live data: mixture MAE £22.22/MWh vs £5.67/MWh
+  flat baseline, a genuine failure. Working diagnosis at the time
+  (raw probabilities from thin demand buckets producing confident,
+  noise-driven errors) led to `shrink_probability_by_bin()`, proven on
+  synthetic noisy data -- corrected by `docs/adr/0021` once re-run
+  against real data at proper scale: the actual cause was a training
+  window of only 1-2 days, not thin-bucket overconfidence. A
+  shrinkage sweep remains in the notebook as a useful diagnostic tool
+  regardless. Two real test-methodology findings along the way: a
+  `hash()`-based mock was silently non-deterministic across process
+  runs, and strict monotonic improvement from shrinkage was wrongly
+  asserted -- what's actually guaranteed is convergence to the
+  unconditional rate as strength grows large.
+- `docs/adr/0021` -- `ElexonImbalancePriceProvider` promoted to
+  production, correcting ADR 0020's shrinkage diagnosis rather than
+  confirming it: with a realistic 60-day training window, the
+  *unshrunk* mixture model achieved a real 2.3% MAE improvement over
+  the flat baseline -- close to Browell & Gilbert's own published 3%
+  day-ahead result. No shrinkage applied in production; the real fix
+  was training data volume, not overconfidence correction.
+  `ElexonBMPriceProvider` kept as a known alternative, no longer the
+  recommended default. First genuinely predictive price provider
+  reaching `optimizer.py` in this project.
+- `docs/adr/0022` -- asymmetric BM_OFFER/BM_BID pricing. Each market
+  now gets `P(its own regime) x mean_price_in_that_regime`
+  (`BM_OFFER`: Short; `BM_BID`: Long), replacing the shared blended
+  forecast both markets received before -- a real economic modelling
+  choice (~0 implicit value in the "wrong" regime), stated as such.
+  Fallback path upgraded alongside the main one to preserve the same
+  asymmetry rather than reverting to a flat blend.

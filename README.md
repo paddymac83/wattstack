@@ -59,7 +59,7 @@ intentionally local-only).
 
 Creates all three packages' virtualenvs, installs `web`'s dependency on
 `core` as an editable local path, runs migrations, and runs all three
-test suites (26 core tests + 6 web tests + 259 ingestion tests). Safe to re-run.
+test suites (26 core tests + 6 web tests + 296 ingestion tests). Safe to re-run.
 
 ### CLI, by hand
 
@@ -79,7 +79,7 @@ wattstack run --config scenarios/example.yaml --sweep
 cd ingestion
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest -v                                    # 259 tests, all mocked -- no network needed
+pytest -v                                    # 296 tests, all mocked -- no network needed
 
 wattstack-explore --verify-only              # confirm both APIs still match what's documented
 wattstack-explore --days 14                  # writes charts to reports/
@@ -90,6 +90,7 @@ marimo edit notebooks/spar_accepted_offer_volume_by_fuel_type.py    # SPAR: dail
 marimo edit notebooks/spar_so_flagged_daily_volume.py               # SPAR: daily SO-Flagged/Unflagged volume, Buy vs Sell
 marimo edit notebooks/demand_forecast_vs_system_tightness.py        # Phase B: does forecast demand predict Long/Short?
 marimo edit notebooks/dc_requirements_by_efa_block.py               # DC requirement by EFA block, inertia, and largest secured loss
+marimo edit notebooks/imbalance_price_probabilistic_forecast.py     # Probabilistic day-ahead System Price forecast, backtested
 ```
 
 ### Web UI, by hand
