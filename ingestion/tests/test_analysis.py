@@ -6,6 +6,12 @@ from wattstack_ingestion.analysis import (
     bin_counts_by_group,
     bucket_start_for_value,
     classify_system_length,
+    DC_ACTIVATION_RECOVERY_WINDOW_PERIODS,
+    DC_ASSESSMENT_PERIOD,
+    DC_RECOVERY_GATE_PERIODS,
+    DC_RECOVERY_PERIODS_FROM_EMPTY,
+    dc_activation_risk_premium,
+    dc_bid_floor_price,
     direction_from_sign,
     efa_block_label,
     efa_block_label_for_index,
@@ -654,3 +660,160 @@ def test_bucket_start_for_value_falls_back_to_nearest_when_value_out_of_training
 
 def test_bucket_start_for_value_returns_none_for_empty_training_data():
     assert bucket_start_for_value(28300, bin_width=1000.0, available_bucket_starts=[]) is None
+
+
+# --- dc_activation_risk_premium ---
+
+
+def test_dc_recovery_window_is_confirmed_8_periods():
+    """1 SP (idle assessment/submission) + 2 SPs (1-hour gate) + 5 SPs
+    (100% / 20%-per-SP minimum recovery rate) -- the full sequence
+    confirmed directly, correcting an earlier version of this test
+    that missed the idle assessment period as a delay distinct from
+    the gate."""
+    assert DC_ASSESSMENT_PERIOD == 1
+    assert DC_RECOVERY_GATE_PERIODS == 2
+    assert DC_RECOVERY_PERIODS_FROM_EMPTY == 5
+    assert DC_ACTIVATION_RECOVERY_WINDOW_PERIODS == 8
+
+
+def test_minimum_energy_requirement_matches_the_documents_own_worked_example():
+    """NESO's own example: 50MW contracted -> 12.5MWh minimum energy
+    requirement (15 minutes at full power). A non-zero degradation
+    cost is used deliberately -- a zero-cost case wouldn't actually
+    prove the 12.5MWh figure is doing anything in the calculation."""
+    # expected_cost_per_event = 1.0 * 12.5 * (1.0 + 0.0) = 12.5; / (50.0 * 0.5) = 0.5
+    premium = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=1.0,
+        wholesale_prices_during_recovery_window=[], activation_probability=1.0,
+    )
+    assert premium == 0.5
+
+
+def test_dc_activation_risk_premium_scales_with_activation_probability():
+    low = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=10.0,
+        wholesale_prices_during_recovery_window=[50.0, 50.0], activation_probability=0.01,
+    )
+    high = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=10.0,
+        wholesale_prices_during_recovery_window=[50.0, 50.0], activation_probability=0.1,
+    )
+    assert high == low * 10  # linear in activation_probability, by construction
+
+
+def test_dc_activation_risk_premium_zero_probability_gives_zero_premium():
+    premium = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=10.0,
+        wholesale_prices_during_recovery_window=[40.0, 90.0], activation_probability=0.0,
+    )
+    assert premium == 0.0
+
+
+def test_dc_activation_risk_premium_uses_price_spread_not_average():
+    """The opportunity-cost term should reflect max-min (a volatility/
+    range proxy), not the average price level -- two windows with the
+    same mean but different spread must give different premiums."""
+    narrow_spread = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=0.0,
+        wholesale_prices_during_recovery_window=[60.0, 60.0], activation_probability=1.0,
+    )
+    wide_spread = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=0.0,
+        wholesale_prices_during_recovery_window=[20.0, 100.0], activation_probability=1.0,
+    )
+    assert wide_spread > narrow_spread
+
+
+def test_dc_activation_risk_premium_handles_empty_price_window():
+    """No wholesale price data for the recovery window must degrade
+    gracefully (spread=0, only degradation cost counted), not crash."""
+    premium = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=5.0,
+        wholesale_prices_during_recovery_window=[], activation_probability=1.0,
+    )
+    # expected_cost_per_event = 1.0 * 12.5 * (5.0 + 0.0) = 62.5; / (50.0 * 0.5) = 2.5
+    assert premium == 2.5
+
+
+def test_dc_activation_risk_premium_full_worked_example():
+    """A complete, hand-calculable case, matching NESO's own 50MW
+    example for the energy figure."""
+    # minimum_energy_mwh = 50 * 0.25 = 12.5
+    # price_spread = 90 - 40 = 50
+    # expected_cost_per_event = 0.02 * 12.5 * (8.0 + 50.0) = 0.02 * 12.5 * 58.0 = 14.5
+    # premium = 14.5 / (50.0 * 0.5) = 0.58
+    premium = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=8.0,
+        wholesale_prices_during_recovery_window=[40.0, 65.0, 90.0, 55.0], activation_probability=0.02,
+    )
+    assert abs(premium - 0.58) < 1e-9
+
+
+def test_dc_activation_risk_premium_respects_custom_settlement_period_hours():
+    default_dt = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=10.0,
+        wholesale_prices_during_recovery_window=[50.0], activation_probability=1.0,
+    )
+    custom_dt = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=10.0,
+        wholesale_prices_during_recovery_window=[50.0], activation_probability=1.0,
+        settlement_period_hours=1.0,
+    )
+    assert custom_dt == default_dt / 2  # doubling dt halves the per-hour premium
+
+
+# --- dc_bid_floor_price ---
+
+
+def test_dc_bid_floor_price_combines_baseline_opportunity_cost_and_activation_premium():
+    """Hand-calculable: baseline opportunity cost from EFA-block price
+    spread / 4h, plus the (separately already-tested) activation
+    premium -- checked here as a genuine sum, not a black box."""
+    # baseline: (90-40)/4.0 = 12.5
+    # activation premium: 0.02 * (50*0.25) * (8.0+50.0) / (50*0.5) -- matches the full worked example already tested
+    floor = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=[40.0, 65.0, 90.0, 55.0, 60.0, 70.0, 45.0, 80.0],
+        contracted_mw=50.0, degradation_cost_per_mwh=8.0, activation_probability=0.02,
+        wholesale_prices_during_recovery_window=[40.0, 65.0, 90.0, 55.0],
+    )
+    expected_baseline = (90.0 - 40.0) / 4.0
+    expected_premium = 0.58  # from test_dc_activation_risk_premium_full_worked_example
+    assert abs(floor - (expected_baseline + expected_premium)) < 1e-9
+
+
+def test_dc_bid_floor_price_zero_when_flat_prices_and_no_activation_risk():
+    floor = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=[50.0, 50.0, 50.0, 50.0],
+        contracted_mw=50.0, degradation_cost_per_mwh=0.0, activation_probability=0.0,
+        wholesale_prices_during_recovery_window=[50.0, 50.0],
+    )
+    assert floor == 0.0
+
+
+def test_dc_bid_floor_price_scales_inversely_with_efa_block_hours():
+    narrower_block = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=[40.0, 90.0], contracted_mw=50.0,
+        degradation_cost_per_mwh=0.0, activation_probability=0.0,
+        wholesale_prices_during_recovery_window=[], efa_block_hours=2.0,
+    )
+    wider_block = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=[40.0, 90.0], contracted_mw=50.0,
+        degradation_cost_per_mwh=0.0, activation_probability=0.0,
+        wholesale_prices_during_recovery_window=[], efa_block_hours=4.0,
+    )
+    assert narrower_block == wider_block * 2  # same spread, half the hours -> double the £/MW/h rate
+
+
+def test_dc_bid_floor_price_handles_empty_efa_block_prices():
+    floor = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=[], contracted_mw=50.0,
+        degradation_cost_per_mwh=5.0, activation_probability=0.1,
+        wholesale_prices_during_recovery_window=[],
+    )
+    # baseline term is 0.0 (no price data); only the activation premium contributes
+    expected_premium = dc_activation_risk_premium(
+        contracted_mw=50.0, degradation_cost_per_mwh=5.0,
+        wholesale_prices_during_recovery_window=[], activation_probability=0.1,
+    )
+    assert floor == expected_premium

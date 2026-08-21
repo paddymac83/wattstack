@@ -21,7 +21,6 @@ def _():
     from wattstack_ingestion.cache import Cache
     from wattstack_ingestion.elexon import ElexonClient
     from wattstack_ingestion.forecasts import ElexonDemandForecastProvider
-
     return (
         Cache,
         ElexonClient,
@@ -29,9 +28,11 @@ def _():
         bin_counts_by_group,
         bucket_start_for_value,
         classify_system_length,
+        date,
         datetime,
         mo,
         pd,
+        probability_by_bin,
         shrink_probability_by_bin,
         timedelta,
         timezone,
@@ -40,75 +41,77 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("""
-    # Probabilistic day-ahead imbalance (System Price) forecast
+    mo.md(
+        """
+        # Probabilistic day-ahead imbalance (System Price) forecast
 
-    Built from two real sources, not from scratch:
+        Built from two real sources, not from scratch:
 
-    - Timera Energy, ["The rising cost of system imbalance"](https://timera-energy.com/blog/the-rising-cost-of-system-imbalance/)
-      (Mar 2026) -- the central point this notebook is built around:
-      *"the risk is in the distribution -- not the mean."* The
-      average Day-Ahead-vs-imbalance spread is ~zero (a competitive
-      market arbitrages away any persistent bias); what varies, and
-      is genuinely predictable, is the *shape* of the distribution.
-    - Browell & Gilbert,
-      ["Predicting Electricity Imbalance Prices and Volumes"](https://pure.strath.ac.uk/ws/portalfiles/portal/135622617/Browell_Gilbert_Energies_2022_Predicting_electricity_imbalance_prices_and_volumes.pdf)
-      (Energies, 2022) -- the concrete day-ahead architecture this
-      notebook implements: *"Separate density forecasts for long
-      and short systems are combined according to the forecast
-      probability of the system being long or short."*
+        - Timera Energy, ["The rising cost of system imbalance"](https://timera-energy.com/blog/the-rising-cost-of-system-imbalance/)
+          (Mar 2026) -- the central point this notebook is built around:
+          *"the risk is in the distribution -- not the mean."* The
+          average Day-Ahead-vs-imbalance spread is ~zero (a competitive
+          market arbitrages away any persistent bias); what varies, and
+          is genuinely predictable, is the *shape* of the distribution.
+        - Browell & Gilbert,
+          ["Predicting Electricity Imbalance Prices and Volumes"](https://pure.strath.ac.uk/ws/portalfiles/portal/135622617/Browell_Gilbert_Energies_2022_Predicting_electricity_imbalance_prices_and_volumes.pdf)
+          (Energies, 2022) -- the concrete day-ahead architecture this
+          notebook implements: *"Separate density forecasts for long
+          and short systems are combined according to the forecast
+          probability of the system being long or short."*
 
-    **Set expectations honestly, from the paper's own result, not
-    optimism:** their day-ahead model beat a simple climatological
-    benchmark by only **3% MAE**. Their own words: *"climatological
-    or simple models perform well and are very difficult to improve
-    on"* at the day-ahead horizon specifically -- real improvement
-    only shows up intraday (5-40%), where far more information is
-    available. The honest target here is a modest, measurable
-    improvement over the flat seasonal average already built
-    (`ElexonBMPriceProvider`), not a large leap.
+        **Set expectations honestly, from the paper's own result, not
+        optimism:** their day-ahead model beat a simple climatological
+        benchmark by only **3% MAE**. Their own words: *"climatological
+        or simple models perform well and are very difficult to improve
+        on"* at the day-ahead horizon specifically -- real improvement
+        only shows up intraday (5-40%), where far more information is
+        available. The honest target here is a modest, measurable
+        improvement over the flat seasonal average already built
+        (`ElexonBMPriceProvider`), not a large leap.
 
-    **Real correction from what's already built:** this targets
-    **System Price** (the real imbalance settlement price), not the
-    BOD submitted-price average `ElexonBMPriceProvider` currently
-    uses. Timera's own framing -- *"the imbalance price is derived
-    from the marginal action taken within the BM"* -- makes System
-    Price the more principled quantity: it already reflects which
-    action was actually needed, not just what was offered.
+        **Real correction from what's already built:** this targets
+        **System Price** (the real imbalance settlement price), not the
+        BOD submitted-price average `ElexonBMPriceProvider` currently
+        uses. Timera's own framing -- *"the imbalance price is derived
+        from the marginal action taken within the BM"* -- makes System
+        Price the more principled quantity: it already reflects which
+        action was actually needed, not just what was offered.
 
-    **The architecture:**
-    ```
-    F(price) = P(Short) x F(price | Short) + P(Long) x F(price | Long)
-    ```
-    `P(Short)` comes from a genuine, data-driven empirical
-    probability (`probability_by_bin()`, new) -- not a
-    classification, a probability, conditioned on forecast demand.
-    `F(price | Short)` and `F(price | Long)` are empirical
-    conditional distributions of real historical System Price,
-    split by realised system length (`classify_system_length()`,
-    already validated against Elexon's published SPAR figures).
+        **The architecture:**
+        ```
+        F(price) = P(Short) x F(price | Short) + P(Long) x F(price | Long)
+        ```
+        `P(Short)` comes from a genuine, data-driven empirical
+        probability (`probability_by_bin()`, new) -- not a
+        classification, a probability, conditioned on forecast demand.
+        `F(price | Short)` and `F(price | Long)` are empirical
+        conditional distributions of real historical System Price,
+        split by realised system length (`classify_system_length()`,
+        already validated against Elexon's published SPAR figures).
 
-    **What this notebook does NOT yet do:** promote anything to a
-    production `PriceProvider` -- that's the next step, after this
-    validates (or doesn't) against real held-out data. Same
-    "explore, then promote" discipline as every other real signal
-    in this project.
+        **What this notebook does NOT yet do:** promote anything to a
+        production `PriceProvider` -- that's the next step, after this
+        validates (or doesn't) against real held-out data. Same
+        "explore, then promote" discipline as every other real signal
+        in this project.
 
-    **Real finding, from a real run against live data:** the first
-    version of this notebook used raw empirical probabilities and
-    was dramatically *worse* than the flat baseline (£22/MWh MAE
-    vs £5.67/MWh -- a mixture model losing to a plain average).
-    Diagnosed, not dismissed: a demand bucket with only a handful
-    of historical observations can show a raw rate like "100%
-    Short" purely by chance, and a mixture model that *confidently*
-    swings toward the Short-mean based on that noise is worse than
-    an honest average -- being confidently wrong costs more than
-    being uncertain. Fixed with `shrink_probability_by_bin()`
-    (new): pulls thin buckets toward the dataset's overall rate,
-    barely touching well-populated ones. A diagnostic cell below
-    shows bucket sample sizes directly, so this is visible, not
-    hidden inside the probability numbers.
-    """)
+        **Real finding, from a real run against live data:** the first
+        version of this notebook used raw empirical probabilities and
+        was dramatically *worse* than the flat baseline (£22/MWh MAE
+        vs £5.67/MWh -- a mixture model losing to a plain average).
+        Diagnosed, not dismissed: a demand bucket with only a handful
+        of historical observations can show a raw rate like "100%
+        Short" purely by chance, and a mixture model that *confidently*
+        swings toward the Short-mean based on that noise is worse than
+        an honest average -- being confidently wrong costs more than
+        being uncertain. Fixed with `shrink_probability_by_bin()`
+        (new): pulls thin buckets toward the dataset's overall rate,
+        barely touching well-populated ones. A diagnostic cell below
+        shows bucket sample sizes directly, so this is visible, not
+        hidden inside the probability numbers.
+        """
+    )
     return
 
 
@@ -130,18 +133,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    datetime,
-    days_to_fetch,
-    elexon,
-    fetch,
-    forecast_provider,
-    mo,
-    pd,
-    start_date,
-    timedelta,
-    timezone,
-):
+def _(datetime, days_to_fetch, elexon, fetch, forecast_provider, mo, pd, start_date, timedelta, timezone):
     mo.stop(not fetch.value, mo.md("*Click Fetch above.*"))
 
     _demand_rows, _actual_rows = [], []
@@ -185,20 +177,12 @@ def _(actual_df, demand_df, mo):
     niv_field = mo.ui.dropdown(options=list(actual_df.columns), label="NIV field")
     demand_bin_width = mo.ui.number(value=1000, label="Demand bin width (MW)")
     mo.vstack([mo.hstack([forecast_period_field, demand_field]), mo.hstack([price_field, niv_field, demand_bin_width])])
-    return (
-        demand_bin_width,
-        demand_field,
-        forecast_period_field,
-        niv_field,
-        price_field,
-    )
+    return demand_bin_width, demand_field, forecast_period_field, niv_field, price_field
 
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## The table: forecast demand joined against realised price and system length
-    """)
+    mo.md("## The table: forecast demand joined against realised price and system length")
     return
 
 
@@ -251,15 +235,17 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## Train/test split
+    mo.md(
+        """
+        ## Train/test split
 
-    Chronological, not random -- a random split would leak future
-    information into training (a day's realised price shouldn't
-    help predict an earlier day's forecast), the same reason
-    Browell & Gilbert used a strict chronological holdout
-    (Jan 2017-Oct 2020 train, Oct-Dec 2020 test).
-    """)
+        Chronological, not random -- a random split would leak future
+        information into training (a day's realised price shouldn't
+        help predict an earlier day's forecast), the same reason
+        Browell & Gilbert used a strict chronological holdout
+        (Jan 2017-Oct 2020 train, Oct-Dec 2020 test).
+        """
+    )
     return
 
 
@@ -291,17 +277,19 @@ def _(labelled_df, mo, test_days_count):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## Train: P(Short | forecast demand bucket) and conditional price distributions
+    mo.md(
+        """
+        ## Train: P(Short | forecast demand bucket) and conditional price distributions
 
-    Both trained on `train_df` only -- the test set is never
-    touched until the final backtest cell.
+        Both trained on `train_df` only -- the test set is never
+        touched until the final backtest cell.
 
-    **Diagnostic first, before trusting any probability number:**
-    how many observations actually sit behind each bucket. A
-    bucket with 2-3 observations is not a reliable estimate of
-    anything, however extreme its raw rate looks.
-    """)
+        **Diagnostic first, before trusting any probability number:**
+        how many observations actually sit behind each bucket. A
+        bucket with 2-3 observations is not a reliable estimate of
+        anything, however extreme its raw rate looks.
+        """
+    )
     return
 
 
@@ -330,13 +318,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    demand_bin_width,
-    mo,
-    shrink_probability_by_bin,
-    shrinkage_strength,
-    train_df,
-):
+def _(demand_bin_width, mo, shrink_probability_by_bin, shrinkage_strength, train_df):
     mo.stop(train_df.empty, mo.md("*No training data yet.*"))
     probability_table = shrink_probability_by_bin(
         train_df["forecast_demand"].tolist(), train_df["system_length"].tolist(),
@@ -378,14 +360,16 @@ def _(mo, train_df):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## Backtest: mixture forecast vs flat baseline, on held-out test data
+    mo.md(
+        """
+        ## Backtest: mixture forecast vs flat baseline, on held-out test data
 
-    Mean Absolute Error against realised price, matching Browell &
-    Gilbert's own evaluation metric directly -- the only honest way
-    to know whether this is a genuine improvement, not just a more
-    complicated way of getting the same answer.
-    """)
+        Mean Absolute Error against realised price, matching Browell &
+        Gilbert's own evaluation metric directly -- the only honest way
+        to know whether this is a genuine improvement, not just a more
+        complicated way of getting the same answer.
+        """
+    )
     return
 
 
@@ -439,19 +423,21 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## Shrinkage sweep: which strength actually performs best?
+    mo.md(
+        """
+        ## Shrinkage sweep: which strength actually performs best?
 
-    Rather than adjusting the slider above one value at a time,
-    this tries a range of `shrinkage_strength` values
-    automatically and reports the resulting backtest MAE for
-    each -- the fastest way to find a good value once real data
-    is loaded, not a replacement for understanding *why*
-    shrinkage matters (see the diagnostic table and intro above
-    for that). `shrinkage_strength=0` here is the raw,
-    unshrunk estimate -- the same one that gave the £22.22/MWh
-    result against real data before this fix.
-    """)
+        Rather than adjusting the slider above one value at a time,
+        this tries a range of `shrinkage_strength` values
+        automatically and reports the resulting backtest MAE for
+        each -- the fastest way to find a good value once real data
+        is loaded, not a replacement for understanding *why*
+        shrinkage matters (see the diagnostic table and intro above
+        for that). `shrinkage_strength=0` here is the raw,
+        unshrunk estimate -- the same one that gave the £22.22/MWh
+        result against real data before this fix.
+        """
+    )
     return
 
 
@@ -517,7 +503,7 @@ def _(
             if _best_row is not None else "*No results.*"
         ),
     ])
-    return
+    return (sweep_df,)
 
 
 if __name__ == "__main__":

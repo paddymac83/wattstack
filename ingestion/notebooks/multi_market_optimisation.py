@@ -26,11 +26,11 @@ provider = CombinedPriceProvider(wholesale_provider=wholesale, reserve_providers
 battery = BatterySpec(power_mw=5, duration_hours=2)
 target_day = date.today() + timedelta(days=1)
 
-# breakpoint()
+breakpoint()
 
 result = optimize_day(
     battery,
-    [Market.WHOLESALE, Market.DYNAMIC_CONTAINMENT_HIGH, Market.DYNAMIC_CONTAINMENT_LOW, Market.BM_OFFER, Market.BM_BID],
+    [Market.WHOLESALE, Market.DYNAMIC_CONTAINMENT_HIGH, Market.DYNAMIC_CONTAINMENT_LOW],
     provider,
     target_day,
 )
@@ -45,4 +45,5 @@ print('BM-Bid price series:', result.reserve_price[Market.BM_BID])
 print('SoC trajectory:', result.soc_mwh)
 print('Charge (MW) by period:', result.charge_mw)
 print('Discharge (MW) by period:', result.discharge_mw)
+breakpoint()
 print('Reserve allocation by market:', result.reserve_mw)

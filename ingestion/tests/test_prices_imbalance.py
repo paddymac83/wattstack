@@ -2,6 +2,8 @@
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from wattstack_ingestion.elexon import ElexonClient
 from wattstack_ingestion.forecasts import ElexonDemandForecastProvider
 from wattstack_ingestion.prices import ElexonImbalancePriceProvider
@@ -83,10 +85,14 @@ def test_reserve_prices_bm_offer_responds_only_to_short_probability(mock_get):
     contribution from Long periods -- period 1 (Long, P(Short)=0 for
     its bucket, given the deterministic mock's clean separation)
     should forecast ~0, not the old blended 40.0; period 2 (Short,
-    P(Short)=1) should forecast the full mean_short (90.0)."""
+    P(Short)=1) should forecast the full mean_short (90.0).
+
+    derating_factor=1.0 explicitly -- this test is about the regime
+    logic specifically, not the derating multiplier (covered by its
+    own dedicated tests below)."""
     provider = ElexonImbalancePriceProvider(
         client=ElexonClient(), forecast_provider=ElexonDemandForecastProvider(client=ElexonClient()),
-        lookback_days=10, demand_bin_width=1000.0,
+        lookback_days=10, demand_bin_width=1000.0, derating_factor=1.0,
     )
     prices = provider.reserve_prices(date(2026, 6, 20), BM_OFFER)
     assert prices[0] == 0.0    # period 1 -- Long -- BM_OFFER isn't valuable here
@@ -99,7 +105,7 @@ def test_reserve_prices_bm_bid_responds_only_to_long_probability(mock_get):
     mean_price_given_long, ~0 contribution from Short periods."""
     provider = ElexonImbalancePriceProvider(
         client=ElexonClient(), forecast_provider=ElexonDemandForecastProvider(client=ElexonClient()),
-        lookback_days=10, demand_bin_width=1000.0,
+        lookback_days=10, demand_bin_width=1000.0, derating_factor=1.0,
     )
     prices = provider.reserve_prices(date(2026, 6, 20), BM_BID)
     assert prices[0] == 40.0   # period 1 -- Long -- BM_BID's own regime, full value
@@ -165,12 +171,64 @@ def _fake_get_missing_period_2_demand(url, params=None, timeout=30):
 def test_reserve_prices_period_with_missing_demand_uses_overall_rate_not_zero(mock_get):
     provider = ElexonImbalancePriceProvider(
         client=ElexonClient(), forecast_provider=ElexonDemandForecastProvider(client=ElexonClient()),
-        lookback_days=5, demand_bin_width=1000.0,
+        lookback_days=5, demand_bin_width=1000.0, derating_factor=1.0,
     )
     prices = provider.reserve_prices(date(2026, 6, 20), BM_OFFER)
     # period 2's own demand is missing from the target forecast, but training data exists (50% Short overall)
     # -- BM_OFFER should reflect that overall rate, not silently fall back to 0.0
     assert prices[1] == 0.5 * 90.0  # overall_p_short (0.5) x mean_short (90.0)
+
+
+# --- derating_factor / acceptance_probability ---
+
+
+@patch("wattstack_ingestion.elexon.requests.get", side_effect=_fake_get_perfectly_separable)
+def test_default_derating_factor_is_applied_to_the_forecast(mock_get):
+    provider = ElexonImbalancePriceProvider(
+        client=ElexonClient(), forecast_provider=ElexonDemandForecastProvider(client=ElexonClient()),
+        lookback_days=10, demand_bin_width=1000.0,
+    )
+    prices = provider.reserve_prices(date(2026, 6, 20), BM_OFFER)
+    assert prices[1] == pytest.approx(90.0 * 0.3)  # default derating_factor
+
+
+@patch("wattstack_ingestion.elexon.requests.get", side_effect=_fake_get_perfectly_separable)
+def test_custom_derating_factor_is_applied_to_the_forecast(mock_get):
+    provider = ElexonImbalancePriceProvider(
+        client=ElexonClient(), forecast_provider=ElexonDemandForecastProvider(client=ElexonClient()),
+        lookback_days=10, demand_bin_width=1000.0, derating_factor=0.6,
+    )
+    prices = provider.reserve_prices(date(2026, 6, 20), BM_OFFER)
+    assert prices[1] == pytest.approx(90.0 * 0.6)
+
+
+def test_default_derating_factor_matches_the_old_providers_starting_point():
+    provider = ElexonImbalancePriceProvider()
+    assert provider.derating_factor == 0.3
+
+
+def test_acceptance_probability_returns_derating_factor_flat_across_all_periods():
+    provider = ElexonImbalancePriceProvider(derating_factor=0.45)
+    probs = provider.acceptance_probability(date(2026, 6, 20), BM_OFFER)
+    assert len(probs) == 48
+    assert all(p == 0.45 for p in probs)
+
+
+def test_acceptance_probability_raises_for_unsupported_markets():
+    provider = ElexonImbalancePriceProvider()
+    try:
+        provider.acceptance_probability(date(2026, 6, 20), WHOLESALE)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "BM_OFFER/BM_BID" in str(e)
+
+
+def test_acceptance_probability_and_reserve_prices_derating_use_the_same_number():
+    """The whole point of sharing derating_factor between the two
+    methods: they must never be independently tunable in a way that
+    could drift out of sync."""
+    provider = ElexonImbalancePriceProvider(derating_factor=0.55)
+    assert provider.acceptance_probability(date(2026, 6, 20), BM_OFFER)[0] == provider.derating_factor
 
 
 @patch("wattstack_ingestion.elexon.requests.get", side_effect=_fake_get_perfectly_separable)

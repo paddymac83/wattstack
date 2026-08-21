@@ -385,6 +385,20 @@ class ElexonImbalancePriceProvider:
     `price_field` (`systemSellPrice`) and `demand_field` (`demand`)
     are still constructor-parameter guesses for anyone whose real
     response shapes differ -- correctable without a code change.
+
+    `derating_factor` (default 0.3, same starting point
+    `ElexonBMPriceProvider` used) prices in the separate risk of THIS
+    specific bid/offer not being the one NESO calls, even in a period
+    where the regime forecast is correct -- a real, distinct risk from
+    "was the regime forecast right at all" (P(Short)/P(Long)), which
+    the mixture model already prices in. Genuinely uncalibrated,
+    stated as such -- see `docs/adr/0023` for what a more principled
+    version would need. Also exposed as `acceptance_probability()`
+    (optional `PriceProvider` extension, `core/optimizer.py`) so the
+    SAME number drives both the revenue discount here and the expected
+    SoC/energy impact of a BM commitment actually being called --
+    deliberately not two separately-tunable numbers that could drift
+    out of sync with each other.
     """
 
     def __init__(
@@ -394,9 +408,10 @@ class ElexonImbalancePriceProvider:
         lookback_days: int = 60,
         demand_bin_width: float = 1000.0,
         period_field: str = "settlementPeriod",
-        demand_field: str = "transmissionSystemDemand",
+        demand_field: str = "demand",
         price_field: str = "systemSellPrice",
         niv_field: str = "netImbalanceVolume",
+        derating_factor: float = 0.3,
     ):
         self.client = client or ElexonClient()
         self.forecast_provider = forecast_provider or ElexonDemandForecastProvider(client=self.client)
@@ -406,6 +421,7 @@ class ElexonImbalancePriceProvider:
         self.demand_field = demand_field
         self.price_field = price_field
         self.niv_field = niv_field
+        self.derating_factor = derating_factor
 
     def _trigger_time(self, target_day: date) -> datetime:
         """10:00 UTC the day before `target_day` -- the same
@@ -444,7 +460,6 @@ class ElexonImbalancePriceProvider:
                 price_row = price_rows.get(demand_row.get(self.period_field))
                 if price_row is None:
                     continue
-
                 demand = demand_row.get(self.demand_field)
                 price = price_row.get(self.price_field)
                 niv = price_row.get(self.niv_field)
@@ -489,8 +504,30 @@ class ElexonImbalancePriceProvider:
                 forecast = p_short * mean_short if mean_short is not None else 0.0
             else:  # BM_BID
                 forecast = p_long * mean_long if mean_long is not None else 0.0
-            result.append(forecast)
+            result.append(forecast * self.derating_factor)
         return result
+
+    def acceptance_probability(self, day: date, market) -> list[float]:
+        """Optional `PriceProvider` extension (`core/optimizer.py`) --
+        not part of the formal Protocol, checked structurally via
+        `hasattr()`. Returns `derating_factor` flat across all 48
+        periods, the SAME number `reserve_prices()` already applies to
+        price -- deliberately one shared number, not two that could
+        silently drift apart. Used by the optimizer to weight the
+        expected energy actually delivered/absorbed by a BM commitment
+        if called, which affects SoC and therefore future charge/
+        discharge decisions -- something DC's availability-style
+        commitments don't need, and don't get (see
+        `MarketSpec.settlement_unit` in `core/markets.py`).
+
+        Raises for the same reason `reserve_prices()` does: a market
+        this provider doesn't cover shouldn't silently return a
+        plausible-looking number.
+        """
+        market_name = getattr(market, "name", str(market))
+        if market_name not in ("BM_OFFER", "BM_BID"):
+            raise ValueError(f"ElexonImbalancePriceProvider only covers BM_OFFER/BM_BID, got {market_name!r}")
+        return [self.derating_factor] * 48
 
 
 class CombinedPriceProvider:

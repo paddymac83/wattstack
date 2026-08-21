@@ -77,9 +77,16 @@ class MarketSpec:
 
 
 # Delivery durations sourced from NESO Dynamic Services guidance
-# (DC ~15 min). BM's default of one settlement period (0.5h) is a
-# simplification -- see ROADMAP.md Phase B for why, and what real
-# acceptance-duration data would refine it.
+# (DC ~15 min). BM's 0.5h (one full settlement period) is confirmed,
+# not just assumed: NESO's MEL/MIL rule change (11 March 2024, per
+# Modo Energy's own reporting) moved battery declared availability
+# from a 15-minute to a 30-minute sustained-delivery basis
+# specifically because most real BM dispatch actions run 30 minutes
+# -- 76% of energy dispatched in H1 2023 was for actions longer than
+# 15 minutes. A battery can now genuinely be called for up to the
+# full settlement period, matching delivery_hours=0.5 exactly. See
+# docs/adr/0023 for the full reasoning and what this changed in the
+# SoC model.
 MARKET_REGISTRY: dict[Market, MarketSpec] = {
     Market.DYNAMIC_CONTAINMENT_HIGH: MarketSpec(
         Market.DYNAMIC_CONTAINMENT_HIGH, direction="charge", delivery_hours=0.25, settlement_unit="per_mw_h"

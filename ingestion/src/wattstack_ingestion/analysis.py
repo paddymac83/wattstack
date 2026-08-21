@@ -605,3 +605,137 @@ def bucket_start_for_value(value: float, bin_width: float, available_bucket_star
     if raw_start in available_bucket_starts:
         return raw_start
     return min(available_bucket_starts, key=lambda b: abs(b - raw_start))
+
+
+# Confirmed directly from NESO's own Dynamic Containment Guidance
+# Document (https://www.neso.energy/document/175296/download), and the
+# exact period-by-period sequence confirmed live, correcting an
+# earlier undercount: an activation event in period t leaves t+1
+# genuinely idle -- the BESS spends that period calculating its SoE
+# recovery plan and submits the replenishment baseline at its end --
+# THEN a separate 2-period (1-hour) gate (t+2, t+3) elapses before the
+# baseline can take effect at t+4. The idle assessment period and the
+# gate are two distinct delays, not one -- an earlier version of this
+# constant folded them into a single 2-period gate, undercounting the
+# true delay by one settlement period. Recovery itself is always 5 SPs
+# from empty (100% / 20% per SP) regardless of contracted MW -- the
+# minimum requirement and recovery rate scale with contracted MW
+# identically, so the ratio is constant. Total window from a
+# full-depletion event to full recovery: 1 (idle assessment) + 2
+# (gate) + 5 (recovery) = 8 settlement periods, 4 hours.
+DC_MINIMUM_ENERGY_REQUIREMENT_HOURS = 0.25  # 15 minutes at full contracted power
+DC_ASSESSMENT_PERIOD = 1  # idle while SoE is assessed and the replenishment baseline is prepared and submitted
+DC_RECOVERY_GATE_PERIODS = 2  # 1-hour gate before a replenishment baseline can take effect
+DC_RECOVERY_PERIODS_FROM_EMPTY = 5  # 100% / 20%-per-SP minimum recovery rate
+DC_ACTIVATION_RECOVERY_WINDOW_PERIODS = (
+    DC_ASSESSMENT_PERIOD + DC_RECOVERY_GATE_PERIODS + DC_RECOVERY_PERIODS_FROM_EMPTY
+)
+
+
+def dc_activation_risk_premium(
+    contracted_mw: float,
+    degradation_cost_per_mwh: float,
+    wholesale_prices_during_recovery_window: list[float],
+    activation_probability: float,
+    settlement_period_hours: float = 0.5,
+) -> float:
+    """A recommended addition to a DC floor bid price (£/MW/h, matching
+    DC's own availability-payment units), pricing the real cost of a
+    genuine activation event -- NOT a full stochastic LP constraint
+    (that's real, harder future work, deliberately not attempted
+    here), an expected-value input to what floor price is worth
+    asking for.
+
+    Two real costs, both scaled by the confirmed minimum energy
+    requirement (15 minutes at full contracted power -- NOT the
+    energy actually delivered in any specific event, a deliberately
+    conservative worst-case magnitude, not a typical one):
+
+    1. Degradation -- wear from the cycle of delivering then
+       recovering that energy.
+    2. Foregone wholesale opportunity during the mandatory recovery
+       window (confirmed 7 settlement periods from a full-depletion
+       event: a 1-hour gate before any replenishment baseline can
+       even take effect, then 5 SPs of rate-limited recovery) -- while
+       following a mandated baseline, the battery can't freely
+       arbitrage wholesale the way it otherwise could. Approximated
+       here as the price spread (max-min) across
+       `wholesale_prices_during_recovery_window` -- a deliberately
+       simple, conservative upper-bound proxy for lost arbitrage
+       value, not a precise calibration. Pass the wholesale price
+       series actually covering that 7-period window (the caller's
+       responsibility -- this function doesn't know which periods
+       those are for a given activation time).
+
+    `activation_probability` is an unresolved, real input -- no
+    attempt is made here to derive it from anything (largest-loss
+    data, ADR 0016, is the most plausible real signal, not yet built
+    into an estimate). Treat this the same way `derating_factor` is
+    treated elsewhere in this project: a stated, tunable parameter,
+    not a calibrated constant.
+    """
+    minimum_energy_mwh = contracted_mw * DC_MINIMUM_ENERGY_REQUIREMENT_HOURS
+    price_spread = (
+        max(wholesale_prices_during_recovery_window) - min(wholesale_prices_during_recovery_window)
+        if wholesale_prices_during_recovery_window
+        else 0.0
+    )
+
+    expected_cost_per_event = activation_probability * minimum_energy_mwh * (degradation_cost_per_mwh + price_spread)
+    return expected_cost_per_event / (contracted_mw * settlement_period_hours)
+
+
+def dc_bid_floor_price(
+    wholesale_prices_during_efa_block: list[float],
+    contracted_mw: float,
+    degradation_cost_per_mwh: float,
+    activation_probability: float,
+    wholesale_prices_during_recovery_window: list[float],
+    efa_block_hours: float = 4.0,
+) -> float:
+    """A recommended DC bid floor (£/MW/h, matching DC's own units) --
+    the minimum price at which offering this capacity to DC, instead
+    of using it for wholesale arbitrage, is worthwhile. Two additive
+    components:
+
+    1. Baseline opportunity cost -- the wholesale arbitrage value
+       forgone by committing this capacity to DC for the whole EFA
+       block, whether or not DC ever actually activates. Approximated
+       as the wholesale price spread (max-min) across
+       `wholesale_prices_during_efa_block`, divided by
+       `efa_block_hours` (4.0, the confirmed real EFA block duration --
+       see EFA_BLOCKS) to convert into a £/MW/h rate. This is a
+       genuine simplification: it assumes one ideal buy-low/sell-high
+       cycle spanning the whole spread, not the value of an actually
+       optimal wholesale-only dispatch for this capacity -- the same
+       kind of conservative, spread-based proxy already used in
+       dc_activation_risk_premium(), for methodological consistency
+       between the two, not because it's a precise calculation.
+    2. `dc_activation_risk_premium()` -- degradation cost plus the
+       *additional* foregone wholesale opportunity specific to the
+       mandatory post-activation recovery window, weighted by
+       `activation_probability`. See that function's own docstring for
+       the full reasoning; not repeated here.
+
+    Pass real, pre-09:50 wholesale price information for
+    `wholesale_prices_during_efa_block` -- this floor is meant to be
+    set using only what's known before the wholesale gate closes,
+    matching a strategy that forgoes wholesale participation entirely
+    in favour of DC, priced against what wholesale would have been
+    worth.
+    """
+    baseline_opportunity_cost_per_mwh = (
+        max(wholesale_prices_during_efa_block) - min(wholesale_prices_during_efa_block)
+        if wholesale_prices_during_efa_block
+        else 0.0
+    )
+    baseline_opportunity_cost_per_mw_h = baseline_opportunity_cost_per_mwh / efa_block_hours
+
+    activation_premium = dc_activation_risk_premium(
+        contracted_mw=contracted_mw,
+        degradation_cost_per_mwh=degradation_cost_per_mwh,
+        wholesale_prices_during_recovery_window=wholesale_prices_during_recovery_window,
+        activation_probability=activation_probability,
+    )
+
+    return baseline_opportunity_cost_per_mw_h + activation_premium

@@ -227,6 +227,143 @@ dataset's overall Short/Long rate through the same per-market formula,
 not a flat blend that would have silently reintroduced the problem
 this change removes.
 
+**BM SoC modelling and acceptance-risk pricing, `docs/adr/0023`.** A
+real gap, visible directly in a live run: every reserve market had
+zero effect on SoC beyond headroom/footroom margin -- BM-Offer sat at
+full power for 42 consecutive periods with SoC flat throughout, which
+is not how BM actually works once a bid is called. Fixed with an
+optional `acceptance_probability(day, market) -> list[float]`
+`PriceProvider` extension (checked via `hasattr()`, not added to the
+formal Protocol, so `SyntheticPriceProvider` and every provider
+without an acceptance-risk concept are unaffected), feeding an
+expected-energy term into the SoC recursion for BM specifically (never
+DC, which is genuinely availability-only) -- proven correct by an
+isolated-period hand-calculation test and a full-recursion
+reconstruction test, not just that the solver still finds a solution.
+Headroom/footroom stay based on the *full*, un-derated commitment --
+a low acceptance probability must never justify holding less margin
+than the worst case would need. A real, sourced fact grounds the
+30-minute duration already in `MARKET_REGISTRY`: NESO's MEL/MIL rule
+change (11 March 2024, Modo Energy's reporting) moved battery declared
+availability from 15 to 30 minutes specifically because most real BM
+actions run that long -- confirming, not just assuming, that
+`delivery_hours=0.5` for BM was already correct.
+`ElexonImbalancePriceProvider` gains `derating_factor` (0.3, same
+starting point `ElexonBMPriceProvider` used, still uncalibrated) --
+deliberately the *same* number driving both the price discount and the
+SoC impact, not two independently-tunable values that could drift
+apart. The ADR's own "future work" section engages directly with the
+deeper point raised alongside this request: acceptance risk applies to
+all four markets, not just BM (DC has zero risk-modelling for auction
+clearing itself); a flat constant conflates "was the regime forecast
+right" with "was *my* specific bid the one selected"; a real
+calibration path exists (BOD+BOALF joined) and isn't built; and the
+deepest version of this isn't a better price signal at all but a
+genuinely different optimizer structure (two-stage stochastic, or a
+VaR/CVaR-constrained approach using the notebook's already-computed,
+currently-unused conditional quantiles) -- named as real, substantial
+future work, not implied solved by one derating parameter.
+
+**Strategy pivot, discussed then built: BM/intraday descoped from
+the primary optimization**, treated as a fallback layer after DC and
+day-ahead wholesale decisions, not actively optimized for. Real
+timeline facts anchor the resulting architecture, confirmed directly
+from NESO's own current guidance rather than assumed: wholesale gate
+closure 09:50, DC/DM/DR/BR/QR gate closure 14:00 (an older document
+showed 14:30, superseded once EAC consolidated these services into one
+auction). Since DC's deadline is *after* wholesale's, and wholesale
+results are known well before 14:00, the right architecture is a
+genuine two-stage decision -- wholesale committed first under a
+probabilistic view of DC's value, DC committed second with the
+wholesale outcome already known -- not a simultaneous joint decision
+guessing at both. Built, `docs/adr/0025`, immediately after the DC
+SoE work below.
+
+**Two-stage optimizer, `docs/adr/0025`.** `optimize_day()` gains
+`fixed_wholesale_mw` -- a schedule already decided elsewhere, not a
+free decision for that call, validated (length, physical bounds)
+before any LP construction. No duplicated LP logic needed: PuLP
+accepts plain floats interchangeably with `LpVariable`s, so the same
+constraint/objective code handles both the free and fixed case.
+`optimize_day_two_stage()` runs the existing joint LP for stage 1
+(wholesale + DC, informed by an expected view of DC's value -- not
+blind to it), keeps only its wholesale schedule, then re-runs DC alone
+for stage 2 with that schedule fixed and (optionally different)
+stage-2 pricing. `TwoStageResult`'s field names
+(`stage1_plan`/`stage2_final`) are deliberate, not generic -- stage
+1's own DC numbers are a discarded planning estimate, and the naming
+makes misusing them as the real answer harder. A real infeasibility
+bug was found and fixed during testing, not a hypothetical: feeding
+stage 1's rounded output back into stage 2 accumulated a
+thousandths-of-an-MWh SoC drift that violated zero-tolerance hard LP
+bounds -- fixed with a small, deliberately targeted tolerance applied
+only to the fixed-schedule path, diagnosed by hand-recomputing the SoC
+trajectory rather than guessed at.
+
+**Strategy pivot: DC-only bidding, wholesale as pure opportunity-cost
+proxy, `docs/adr/0026`.** No active wholesale or BM decisions --
+capacity committed entirely to DC-L/DC-H at 14:00, priced against what
+wholesale (using only pre-09:50 information) and BM would have
+forgone. `dc_bid_floor_price()` adds the missing baseline opportunity-
+cost term `dc_activation_risk_premium()` didn't cover on its own (that
+function only prices the *additional* cost specific to the post-
+activation recovery window) -- wholesale price spread across the EFA
+block, divided by EFA block hours, same spread-based methodology as
+the activation premium for consistency. A genuine timing ambiguity
+surfaced while designing the requested DC SoC optimization -- an
+8-period vs 7-period total recovery window, both defensible readings
+of NESO's own worked example -- was confirmed live and resolved: 8 is
+correct, the idle assessment/submission period is a real, separate
+delay from the 1-hour gate. See `docs/adr/0027` immediately below for
+the correction and the resulting SoC model, built once the timing was
+settled rather than guessed at.
+
+**DC multi-period SoC modelling, `docs/adr/0027`.** With the timing
+confirmed, the requested DC SoC optimization is built: a new optional
+`dc_activation_probability()` `PriceProvider` extension (structurally
+identical to BM's `acceptance_probability()`, deliberately a different
+method name since it measures a different thing -- probability of a
+real activation *event*, not of a bid being selected) feeds a
+multi-period expected-SoC term into `core`'s SoC recursion. An
+activation at period `t` drains (DC-Low) or charges (DC-High)
+immediately, contributes nothing for the confirmed 3 idle/gate periods,
+then recovers over exactly the next 5 periods -- proven directly by
+test that recovery begins precisely at offset 4 (not 1, 2, or 3), and
+that the 5 recovery increments sum to exactly the original drain, not
+a partial or over-corrected one. DC-High confirmed as the exact sign-
+mirror of DC-Low. Headroom/footroom stay fully un-derated, the same
+discipline BM's version already established. All 47 pre-existing core
+tests passed unchanged, both before and after -- the new mechanism's
+safe default (`0.0` activation probability) preserves every existing
+assumption exactly. `dc_activation_probability` itself remains
+genuinely unresolved -- no attempt made here to derive it from
+anything real.
+
+**DC State-of-Energy management, `docs/adr/0024`.** Every SoE figure
+the user described (15-minute minimum energy requirement, 20%-per-SP
+recovery, the 1-hour gate, 5%-per-minute ramp rate) confirmed exactly
+against NESO's own Dynamic Containment Guidance Document, fetched and
+verified directly. A clean algebraic finding: full recovery from empty
+always takes exactly 5 settlement periods regardless of contracted MW,
+since the minimum requirement and recovery rate scale identically --
+plus the confirmed 1-hour gate gives a 7-period (3.5-hour) total
+recovery window from a full-depletion event. `dc_activation_risk_premium()`
+prices this as an expected-value addition to a DC floor bid (£/MW/h)
+-- degradation cost plus foregone wholesale opportunity during the
+mandatory recovery window (approximated as price spread across that
+window, a deliberately conservative proxy, not a calibration) -- both
+scaled by the confirmed minimum energy requirement, weighted by an
+`activation_probability` that is explicitly unresolved here, same
+treatment as `derating_factor` elsewhere. Deliberately a pricing input,
+not a new LP constraint -- an exact, conditional recovery constraint
+needs genuinely stochastic, path-dependent state a deterministic-
+equivalent day-ahead LP can't represent, the same two-stage/stochastic
+territory already named in ADR 0023, not attempted here. A separate,
+real discrepancy surfaced and was named, not fixed: `MARKET_REGISTRY`'s
+existing `delivery_hours=0.5` for DC assumes a fuller 30-minute
+sustained commitment than NESO's actual 15-minute minimum requires --
+worth a deliberate decision, not silently altered.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -657,3 +794,58 @@ Don't duplicate these here:
   choice (~0 implicit value in the "wrong" regime), stated as such.
   Fallback path upgraded alongside the main one to preserve the same
   asymmetry rather than reverting to a flat blend.
+- `docs/adr/0023` -- BM SoC modelling via an expected-energy term
+  (only for energy-settled BM, never availability-style DC), grounded
+  in NESO's real 30-minute MEL/MIL rule change; `ElexonImbalancePriceProvider`
+  gains `derating_factor` (0.3, uncalibrated), the same number driving
+  both the price discount and the SoC impact. Headroom/footroom
+  deliberately stay un-derated -- full worst-case margin regardless of
+  acceptance likelihood. Extensive "future work" section: acceptance
+  risk applies to all four markets, not just BM; a flat constant
+  conflates two genuinely different risks; a real BOD+BOALF
+  calibration path exists unbuilt; and the deepest fix is a different
+  optimizer structure entirely (two-stage stochastic or VaR/CVaR),
+  not a better price signal -- named as real future work, not implied
+  solved.
+- `docs/adr/0024` -- DC State-of-Energy management, every figure
+  confirmed exactly against NESO's own Dynamic Containment Guidance
+  Document (15-min minimum energy requirement, 20%-per-SP recovery,
+  1-hour gate, 5%-per-minute ramp rate). Full recovery from empty is
+  always 5 SPs regardless of contracted MW (the requirement and
+  recovery rate scale identically); with the gate, a 7-period (3.5h)
+  total recovery window. `dc_activation_risk_premium()` prices this
+  as a DC floor bid addition (degradation + foregone wholesale
+  opportunity during recovery, both scaled by the confirmed minimum
+  energy requirement) -- a pricing input, not a new LP constraint;
+  the exact stochastic recovery constraint remains named future work.
+  A real discrepancy surfaced: `delivery_hours=0.5` assumes more
+  sustained-delivery margin than NESO's actual 15-minute requirement.
+- `docs/adr/0025` -- two-stage optimizer: `optimize_day()` gains
+  `fixed_wholesale_mw` (validated, LP-unified via PuLP's plain-float
+  support -- no duplicated logic), `optimize_day_two_stage()` runs
+  wholesale+DC jointly for stage 1, keeps only its wholesale schedule,
+  re-decides DC alone for stage 2 with that schedule fixed.
+  `TwoStageResult.stage1_plan`/`.stage2_final` naming deliberately
+  makes misusing the discarded stage-1 DC estimate harder. Found and
+  fixed a real infeasibility bug during testing: stage 1's rounded
+  output, fed back as stage 2's fixed input, accumulated enough SoC
+  drift to violate zero-tolerance hard LP bounds -- fixed with a
+  small, targeted tolerance on the fixed-schedule path only.
+- `docs/adr/0026` -- `dc_bid_floor_price()`, combining a new wholesale
+  opportunity-cost term (EFA-block price spread / EFA hours, same
+  methodology as the activation premium) with the existing
+  `dc_activation_risk_premium()`. Surfaced a genuine timing ambiguity
+  while designing the requested DC SoC modeling: an 8-period vs
+  7-period total recovery window, both defensible readings of NESO's
+  own worked example -- confirmed live and resolved in `docs/adr/0027`.
+- `docs/adr/0027` -- DC multi-period SoC modelling, built once the
+  timing was confirmed (8 periods: 1 idle assessment + 2 gate + 5
+  recovery, correcting `docs/adr/0024`'s original 7-period undercount).
+  New `dc_activation_probability()` `PriceProvider` extension feeds a
+  multi-period expected-SoC term into the recursion -- drain/charge
+  immediately, nothing for 3 idle/gate periods, recovery over the next
+  5, proven exact by test (recovery starts precisely at offset 4;
+  the 5 increments sum to exactly the original drain). DC-High
+  confirmed the exact sign-mirror of DC-Low. All 47 pre-existing core
+  tests unaffected -- the new mechanism's safe default preserves every
+  existing assumption exactly.
