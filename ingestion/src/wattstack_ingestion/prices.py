@@ -165,6 +165,16 @@ class NesoDCPriceProvider:
     covers November 2023 onwards) -- without an explicit sort, "most
     recent limit rows" isn't a safe assumption about what any API
     returns by default.
+
+    Also implements the optional `dc_activation_probability(day, market)`
+    `PriceProvider` extension (checked via `hasattr()` in
+    `core.optimizer`, see docs/adr/0027) -- a single, flat,
+    constructor-supplied constant (`activation_probability`, default
+    0.02) across every period, not derived from anything real. Same
+    stated-parameter honesty as `ElexonBMPriceProvider.acceptance_derating`
+    and `ElexonImbalancePriceProvider`'s derating: the largest-loss
+    data explored in docs/adr/0016 remains the most plausible real
+    signal for this, and is not built into an estimate here.
     """
 
     def __init__(
@@ -177,6 +187,7 @@ class NesoDCPriceProvider:
         price_field: str = "clearingPrice",
         dc_high_value: str = "DCH",
         dc_low_value: str = "DCL",
+        activation_probability: float = 0.02,
     ):
         self.client = client or NesoClient()
         self.lookback_days = lookback_days
@@ -186,6 +197,20 @@ class NesoDCPriceProvider:
         self.price_field = price_field
         self.dc_high_value = dc_high_value
         self.dc_low_value = dc_low_value
+        self.activation_probability = activation_probability
+
+    def dc_activation_probability(self, day: date, market) -> list[float]:
+        """A flat `self.activation_probability` across all 48 periods,
+        regardless of `day` or which DC market is asked -- the
+        simplest possible starting point, not a calibrated estimate.
+        Still validates `market` the same way reserve_prices() does,
+        so a caller asking about a market this provider doesn't cover
+        gets the same clear error rather than a silently wrong answer.
+        """
+        market_name = getattr(market, "name", str(market))
+        if market_name not in ("DYNAMIC_CONTAINMENT_HIGH", "DYNAMIC_CONTAINMENT_LOW"):
+            raise ValueError(f"NesoDCPriceProvider only covers DC-High/DC-Low, got {market_name!r}")
+        return [self.activation_probability] * 48
 
     def reserve_prices(self, day: date, market) -> list[float]:
         """48 half-hourly prices for `day` and `market` -- DC-High or

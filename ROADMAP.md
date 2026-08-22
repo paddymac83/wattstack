@@ -364,6 +364,60 @@ existing `delivery_hours=0.5` for DC assumes a fuller 30-minute
 sustained commitment than NESO's actual 15-minute minimum requires --
 worth a deliberate decision, not silently altered.
 
+**Wiring `dc_bid_floor_price` into an actual reachable calculation,
+retiring the two-stage script, `docs/adr/0028`.** Two real gaps found
+directly from trying to use this as built: `dc_bid_floor_price()` and
+`dc_activation_risk_premium()` had no caller at all -- undebuggable
+from any real script. And `optimize_day_two_stage()` was the wrong
+tool entirely for the DC-only strategy (ADR 0026) -- that function
+exists to commit a wholesale schedule in stage 1, but the current
+strategy never holds a wholesale position, so there's no stage 1
+decision to make. `dc_bid_floor_prices_by_efa_block()` (new) is the
+actual wiring: given a full day's wholesale forecast, groups periods
+into their EFA block (reusing `efa_block_number_for_hour()`, not
+reimplemented) and calls the already-tested per-block formula once per
+block -- proven by test that each result is identical to calling it
+directly, not a parallel calculation that could drift. `dc_floor_price_calculator.py`
+replaces `two_stage_wholesale_dc.py` entirely (not alongside it) --
+fetches a pre-09:50 wholesale forecast, prints all 6 blocks' floor
+prices; at the time of this ADR, a pure calculation with no `core`
+import, extended the same day (see `docs/adr/0029` below) once
+`dc_activation_probability()` existed to make a dispatch-planning step
+meaningful. `ACTIVATION_PROBABILITY` remains the same real, unresolved
+number named since ADR 0024 -- now visible and adjustable in one place
+in a real script, not still just a buried function parameter.
+
+**Closing the loop: `dc_activation_probability` wired to a real
+provider, `docs/adr/0029`.** The `dc_activation_probability()`
+`PriceProvider` extension built in ADR 0027 had no real implementation
+-- pointed out directly: it couldn't be debugged as part of an actual
+end-to-end script. `NesoDCPriceProvider` now implements it (a single
+flat, constructor-supplied constant, default `0.02`, same stated-
+parameter honesty as `ElexonBMPriceProvider.acceptance_derating`).
+`dc_floor_price_calculator.py` gained a Step 2: DC-only dispatch
+planning via `optimize_day()`, with wholesale fixed at *exactly* zero
+(`fixed_wholesale_mw=([0.0]*48, [0.0]*48)`) rather than merely omitted
+from `markets` -- omitting it alone would still leave `charge`/
+`discharge` as free variables the solver could use if ever needed for
+feasibility against the DC activation/recovery mechanism, silently
+reintroducing a wholesale position this strategy explicitly rules out.
+A small `_NoWholesaleActivity` adapter closes a real, generalisable gap
+found along the way: `fixed_wholesale_mw` triggers a `wholesale_prices()`
+fetch for revenue reporting regardless of whether the schedule is all
+zero, so any provider paired with it needs at least a trivial
+implementation, even one with no wholesale concept at all. Validated
+against the actual script file end-to-end with mocked network calls,
+not a reimplementation of its logic -- confirmed charge/discharge
+exactly zero throughout, `dc_activation_probability` genuinely
+readable from the returned `DispatchResult`, and a real, small,
+plausible SoC drift proving the mechanism is live. Two real process
+lessons recorded rather than corrected quietly: a search-string typo
+("price" vs "prices") nearly caused `dc_bid_floor_prices_by_efa_block()`
+to be reported as missing when it already existed and was tested; and
+a new, duplicate script was written before checking whether
+`dc_floor_price_calculator.py` already existed -- it did, and was
+extended in place instead.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -849,3 +903,22 @@ Don't duplicate these here:
   confirmed the exact sign-mirror of DC-Low. All 47 pre-existing core
   tests unaffected -- the new mechanism's safe default preserves every
   existing assumption exactly.
+- `docs/adr/0028` -- `dc_bid_floor_prices_by_efa_block()`, the wiring
+  `dc_bid_floor_price()` was missing (previously had no caller,
+  undebuggable from any real script). `dc_floor_price_calculator.py`
+  replaces `two_stage_wholesale_dc.py` entirely -- the two-stage
+  optimizer was the wrong tool for a strategy that never holds a
+  wholesale position; at the time of this ADR, a direct calculation,
+  no `core` import, no LP solve involved -- extended same-day, see
+  `docs/adr/0029`.
+- `docs/adr/0029` -- `NesoDCPriceProvider.dc_activation_probability()`
+  (a flat, constructor-supplied constant), closing the loop the
+  previous ADR left open: `dc_floor_price_calculator.py` gained a
+  Step 2, DC-only dispatch planning via `optimize_day()` with
+  wholesale fixed to exactly zero, not merely omitted (which would
+  leave it usable by the solver for feasibility, silently
+  reintroducing a position this strategy rules out). Validated against
+  the real script file end-to-end, not a reimplementation. Two process
+  lessons recorded directly: a search typo nearly caused a real,
+  tested function to be reported missing, and a duplicate script was
+  written before checking one already existed.

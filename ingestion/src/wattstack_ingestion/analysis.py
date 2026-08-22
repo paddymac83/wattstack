@@ -739,3 +739,55 @@ def dc_bid_floor_price(
     )
 
     return baseline_opportunity_cost_per_mw_h + activation_premium
+
+def dc_bid_floor_prices_by_efa_block(
+    wholesale_prices: list[float],
+    contracted_mw: float,
+    degradation_cost_per_mwh: float,
+    activation_probability: float,
+) -> dict[int, float]:
+    """`dc_bid_floor_price()` for all 6 EFA blocks of a single day, in
+    one call -- the actual thing needed to set 6 real DC bids from a
+    day-ahead wholesale forecast, not just the underlying per-block
+    formula in isolation. Built specifically because dc_bid_floor_price()
+    and dc_activation_risk_premium() existed only as standalone
+    functions with no path from real fetched data to a usable set of
+    numbers -- not reachable from an actual end-to-end script, and
+    therefore not debuggable as part of one.
+
+    `wholesale_prices` is the full 48-period day (e.g. straight from
+    `ElexonWholesalePriceProvider.wholesale_prices(day)` -- a seasonal
+    average built from information available before 09:50, matching a
+    strategy that prices DC bids without ever holding a wholesale
+    position). Periods are grouped into their EFA block via
+    `efa_block_number_for_hour()`, the same confirmed mapping used
+    everywhere else in this project, not reimplemented here.
+
+    A real simplification, stated plainly: `wholesale_prices_during_recovery_window`
+    is passed the SAME block's own prices as
+    `wholesale_prices_during_efa_block`, not a window that could
+    genuinely extend into the next block if an activation happened
+    near a block's end. Reasonable given the confirmed 8-period (4-hour)
+    recovery window and an EFA block's own 8-period (4-hour) length are
+    the same order of magnitude, but not a precise accounting of where
+    an activation might actually fall within the block.
+
+    Returns `{efa_block_number (1-6): floor_price_gbp_per_mw_h}`.
+    """
+    prices_by_block: dict[int, list[float]] = {block: [] for block in range(1, 7)}
+    for period in range(1, 49):
+        hour = (period - 1) // 2
+        block = efa_block_number_for_hour(hour)
+        prices_by_block[block].append(wholesale_prices[period - 1])
+
+    return {
+        block: dc_bid_floor_price(
+            wholesale_prices_during_efa_block=prices_by_block[block],
+            contracted_mw=contracted_mw,
+            degradation_cost_per_mwh=degradation_cost_per_mwh,
+            activation_probability=activation_probability,
+            wholesale_prices_during_recovery_window=prices_by_block[block],
+        )
+        for block in range(1, 7)
+    }
+

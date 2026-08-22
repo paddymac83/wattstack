@@ -193,3 +193,44 @@ def test_service_type_field_no_longer_exists_as_a_parameter():
     kept unused, since an unused parameter that looks configurable is
     worse than no parameter."""
     assert not hasattr(NesoDCPriceProvider(), "service_type_field")
+
+
+# --- dc_activation_probability ---
+
+
+def test_dc_activation_probability_returns_48_flat_values():
+    provider = NesoDCPriceProvider(activation_probability=0.05)
+    result = provider.dc_activation_probability(date(2026, 6, 15), DC_HIGH)
+    assert result == [0.05] * 48
+
+
+def test_dc_activation_probability_same_value_for_both_dc_markets():
+    """A single, flat parameter -- not calibrated per-market, and
+    honest about that rather than implying an asymmetry that doesn't
+    exist here."""
+    provider = NesoDCPriceProvider(activation_probability=0.03)
+    high_result = provider.dc_activation_probability(date(2026, 6, 15), DC_HIGH)
+    low_result = provider.dc_activation_probability(date(2026, 6, 15), DC_LOW)
+    assert high_result == low_result == [0.03] * 48
+
+
+def test_dc_activation_probability_raises_for_non_dc_market():
+    provider = NesoDCPriceProvider()
+    try:
+        provider.dc_activation_probability(date(2026, 6, 15), WHOLESALE)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "DC-High/DC-Low" in str(e)
+
+
+def test_default_activation_probability_is_a_stated_small_constant():
+    """0.02, not calibrated from anything real -- same honesty as
+    ElexonBMPriceProvider.acceptance_derating and
+    ElexonImbalancePriceProvider's own derating factor."""
+    provider = NesoDCPriceProvider()
+    assert provider.activation_probability == 0.02
+
+
+def test_activation_probability_is_configurable_not_hardcoded():
+    provider = NesoDCPriceProvider(activation_probability=0.1)
+    assert provider.activation_probability == 0.1

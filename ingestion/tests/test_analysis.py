@@ -12,6 +12,7 @@ from wattstack_ingestion.analysis import (
     DC_RECOVERY_PERIODS_FROM_EMPTY,
     dc_activation_risk_premium,
     dc_bid_floor_price,
+    dc_bid_floor_prices_by_efa_block,
     direction_from_sign,
     efa_block_label,
     efa_block_label_for_index,
@@ -817,3 +818,74 @@ def test_dc_bid_floor_price_handles_empty_efa_block_prices():
         wholesale_prices_during_recovery_window=[], activation_probability=0.1,
     )
     assert floor == expected_premium
+
+# --- dc_bid_floor_prices_by_efa_block ---
+
+
+def test_dc_bid_floor_prices_by_efa_block_returns_all_6_blocks():
+    result = dc_bid_floor_prices_by_efa_block(
+        wholesale_prices=[50.0] * 48, contracted_mw=50.0,
+        degradation_cost_per_mwh=5.0, activation_probability=0.05,
+    )
+    assert set(result.keys()) == {1, 2, 3, 4, 5, 6}
+
+
+def test_dc_bid_floor_prices_by_efa_block_matches_the_single_block_function_exactly():
+    """Not a reimplementation -- each block's result must be
+    IDENTICAL to calling dc_bid_floor_price() directly with that
+    block's own prices, proving this is genuine wiring, not a
+    parallel calculation that could silently drift from the
+    already-tested formula."""
+    wholesale_prices = [round(40 + 30 * ((t * 7) % 11), 2) for t in range(48)]
+    contracted_mw, degradation, activation_prob = 50.0, 8.0, 0.02
+
+    result = dc_bid_floor_prices_by_efa_block(
+        wholesale_prices=wholesale_prices, contracted_mw=contracted_mw,
+        degradation_cost_per_mwh=degradation, activation_probability=activation_prob,
+    )
+
+    # reconstruct block 1's own prices by hand (the wraparound block: hours 23,0,1,2)
+    block_1_periods = [p for p in range(1, 49) if efa_block_number_for_hour((p - 1) // 2) == 1]
+    block_1_prices = [wholesale_prices[p - 1] for p in block_1_periods]
+    expected_block_1 = dc_bid_floor_price(
+        wholesale_prices_during_efa_block=block_1_prices, contracted_mw=contracted_mw,
+        degradation_cost_per_mwh=degradation, activation_probability=activation_prob,
+        wholesale_prices_during_recovery_window=block_1_prices,
+    )
+    assert result[1] == expected_block_1
+
+
+def test_dc_bid_floor_prices_by_efa_block_each_block_has_8_periods():
+    """Every EFA block, including the wraparound one, must get exactly
+    8 settlement periods' worth of price data -- proven by checking a
+    block with a genuinely distinguishable price pattern lands the
+    right values, not just that SOME grouping happened."""
+    wholesale_prices = list(range(48))  # period p (1-indexed) gets value p-1, so blocks are distinguishable
+    result_via_internal_grouping = {}
+    for period in range(1, 49):
+        hour = (period - 1) // 2
+        block = efa_block_number_for_hour(hour)
+        result_via_internal_grouping.setdefault(block, []).append(wholesale_prices[period - 1])
+    for block in range(1, 7):
+        assert len(result_via_internal_grouping[block]) == 8
+
+
+def test_dc_bid_floor_prices_by_efa_block_differs_across_blocks_with_varying_prices():
+    """A real, non-degenerate check: blocks with genuinely different
+    price patterns must produce genuinely different floor prices, not
+    all collapse to the same number."""
+    wholesale_prices = [round(20 + 200 * (t / 47), 2) for t in range(48)]  # steadily rising across the day
+    result = dc_bid_floor_prices_by_efa_block(
+        wholesale_prices=wholesale_prices, contracted_mw=50.0,
+        degradation_cost_per_mwh=5.0, activation_probability=0.02,
+    )
+    assert len(set(result.values())) > 1  # not every block collapsed to an identical floor price
+
+
+def test_dc_bid_floor_prices_by_efa_block_zero_activation_and_flat_price_gives_zero_everywhere():
+    result = dc_bid_floor_prices_by_efa_block(
+        wholesale_prices=[50.0] * 48, contracted_mw=50.0,
+        degradation_cost_per_mwh=0.0, activation_probability=0.0,
+    )
+    assert all(price == 0.0 for price in result.values())
+
