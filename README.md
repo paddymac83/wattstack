@@ -59,7 +59,7 @@ intentionally local-only).
 
 Creates all three packages' virtualenvs, installs `web`'s dependency on
 `core` as an editable local path, runs migrations, and runs all three
-test suites (54 core tests + 6 web tests + 324 ingestion tests). Safe to re-run.
+test suites (54 core tests + 6 web tests + 343 ingestion tests). Safe to re-run.
 
 ### CLI, by hand
 
@@ -79,7 +79,7 @@ wattstack run --config scenarios/example.yaml --sweep
 cd ingestion
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest -v                                    # 324 tests, all mocked -- no network needed
+pytest -v                                    # 343 tests, all mocked -- no network needed
 
 wattstack-explore --verify-only              # confirm both APIs still match what's documented
 wattstack-explore --days 14                  # writes charts to reports/

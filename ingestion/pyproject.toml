@@ -9,6 +9,7 @@ dependencies = [
     "click>=8.1",
     "marimo>=0.23",
     "pandas>=2.0",
+    "pulp>=2.8",
 ]
 
 [project.optional-dependencies]

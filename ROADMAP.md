@@ -418,6 +418,42 @@ a new, duplicate script was written before checking whether
 `dc_floor_price_calculator.py` already existed -- it did, and was
 extended in place instead.
 
+**EAC auction clearing simulation, `docs/adr/0030`.** A genuine
+methodological choice, made deliberately rather than defaulted into:
+given the option of a simplified single-product merit-order
+approximation or modelling real co-optimisation effects, fidelity was
+chosen explicitly over simplicity. Grounded in two real sources,
+fetched and read directly: NESO's own 33-page N-SIDE Power Matching
+Algorithm description (confirms the real clearing mechanism is a
+welfare-maximising MILP, not a merit-order stack -- co-optimisation
+across products, baskets, mutual exclusivity, parent/curtailable-child
+structure, substitutable families, "Cost Minimisation Pricing"), and
+both order-level datasets' own schema pages, which corrected a real
+discrepancy found along the way: `KNOWN_RESOURCES` already held
+different, never-confirmed resource IDs for these same two datasets,
+sourced from a general listing page rather than the datasets' own
+pages -- corrected in place, not left as a second, competing pair.
+`eac_auction.py` (new module) implements a real MILP via `pulp`
+(newly an `ingestion` dependency, a third-party solver, not `core`):
+binary parent orders, curtailable children, substitutable-family and
+per-unit mutual-exclusivity constraints -- confirmed scoped to a
+single unit's own baskets, not market-wide, directly from the design
+document's own co-optimisation example, and proven in both directions
+by test. **A real formulation bug was found and fixed, not a
+hypothetical edge case**: the first volume-balance constraint
+(`accepted_sell <= accepted_buy`) let the solver collect buy-side
+welfare with zero matching sell volume -- caught by the simplest
+possible test (one obviously profitable trade returning 0%
+acceptance), diagnosed by hand-reproducing the MILP directly and
+reading the solver's own chosen values, fixed with equality. 19 new
+tests, 343 total, no regressions. Deliberately not modelled, named
+directly: looped baskets, buy-side substitutability, overholding, and
+the real transfer-aware pricing rule (Stage 2 uses a stated
+approximation -- marginal accepted price per product -- not a
+replica). Not yet done: running against live data, and the
+marginal-cost-vs-acceptance-probability sweep the original request
+named as the ultimate goal.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -922,3 +958,17 @@ Don't duplicate these here:
   lessons recorded directly: a search typo nearly caused a real,
   tested function to be reported missing, and a duplicate script was
   written before checking one already existed.
+- `docs/adr/0030` -- EAC auction clearing simulation. Real
+  co-optimisation modelled via a genuine MILP (`pulp`), grounded in
+  NESO's own 33-page algorithm description and both order datasets'
+  own schema pages (correcting a real, never-confirmed pair of
+  resource IDs found along the way). Binary parent orders, curtailable
+  children, substitutable families, per-unit (not market-wide) mutual
+  exclusivity -- confirmed against the design document's own
+  co-optimisation example and proven by test in both directions. A
+  real formulation bug found and fixed: the original volume-balance
+  constraint let the solver collect buy-side welfare with zero
+  matching sell volume, caught by the simplest possible test case.
+  19 new tests, 343 total. Looped baskets, buy-side substitutability,
+  overholding, and exact transfer-aware pricing deliberately not
+  modelled -- named directly, not implied solved.

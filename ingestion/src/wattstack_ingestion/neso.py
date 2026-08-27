@@ -17,17 +17,27 @@ Two honest gaps that remain, both by design rather than oversight:
     (its listing page offers a `datastore/dump/` download link, which
     only exists for datastore-active resources in CKAN -- that's what
     justifies using datastore_search here rather than CSV-parsing a
-    static file). The four "Daily ..." resources on the same page
-    (only offered as plain `.../download/*.csv` links, no
-    `datastore/dump/`) are NOT confirmed to work the same way, and
-    aren't wired up here -- they may need CSV parsing over the
-    download URL instead of datastore_search.
+    static file). The general `eac-auction-results` listing page only
+    showed plain `.../download/*.csv` links for the "Daily..." buy/sell
+    order resources, not `datastore/dump/` -- an earlier version of
+    this module recorded resource IDs for them from that listing page
+    without datastore_search confirmation, and left them unwired.
+    **Corrected**: visiting the actual dataset pages directly
+    (neso_response-reserve_daily_buy_orders /
+    neso_response-reserve_daily_sell_orders) shows a full "CKAN Data
+    API" section with real `datastore_search` example queries -- the
+    same confirmation evidence already trusted elsewhere in this
+    project. The resource IDs below are corrected to match those pages
+    exactly, replacing the earlier, differently-sourced ones (which
+    were never confirmed to work and are not used).
   - The exact field names inside RESULTS_SUMMARY were not confirmed
     live. NESO's own page does confirm the dataset uses
     `deliveryStart` / `deliveryEnd` datetime fields (UTC, not local
     time) -- that's a real, sourced detail, not a guess -- but the
     price/volume column names were not. verify_schema() will show you
-    the real ones on first run.
+    the real ones on first run. Buy/sell order field names ARE fully
+    confirmed directly from their own schema pages (see
+    ResponseReserveOrdersProvider in prices.py), unlike RESULTS_SUMMARY.
 
 DC requirement forecasts (below) are a genuinely different access
 pattern from everything else in this module: confirmed directly from
@@ -113,10 +123,15 @@ KNOWN_RESOURCES = {
     # right one if you want acceptance/clearing behaviour at the
     # individual-unit level rather than a market-wide summary.
     "response_reserve_results_by_unit": "a63ab354-7e68-44c2-ad96-c6f920c30e85",
-    # Submitted orders (not just cleared results) -- useful later for
-    # understanding bid depth/competition, not wired into cli.py yet.
-    "response_reserve_buy_orders": "1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5",
-    "response_reserve_sell_orders": "13b511df-d6ec-4143-afb1-0ecc6fd19810",
+    # Submitted orders (not just cleared results) -- confirmed
+    # datastore-active directly from their own dataset pages
+    # (neso_response-reserve_daily_buy_orders /
+    # ..._sell_orders), each showing a full CKAN Data API section with
+    # real datastore_search examples -- corrected from an earlier,
+    # differently-sourced pair of IDs that were never confirmed to
+    # work this way (see module docstring).
+    "response_reserve_buy_orders": "e638cf3d-bed1-42ae-a984-8fe3c556febf",
+    "response_reserve_sell_orders": "8ba48f26-d73e-4094-a90d-ba075eb739c1",
     # Historical only, does not update -- the sole source for anything
     # before November 2023 (the old Dynamic Containment-only tenders).
     "dc_dr_dm_summary_2021_2023": "888e5029-f786-41d2-bc15-cbfd1d285e96",
