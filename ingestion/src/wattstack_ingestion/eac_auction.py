@@ -207,8 +207,10 @@ def clear_auction(sell_orders: list[SellOrderInput], buy_orders: list[BuyOrderIn
 
     buy_vars = {bo.order_id: pulp.LpVariable(f"buy_{bo.order_id}", lowBound=0, upBound=1) for bo in buy_orders}
 
+    # demand utility as per n-side EAC design doc
     buy_utility = pulp.lpSum(buy_vars[bo.order_id] * bo.quantity_mw * bo.price for bo in buy_orders)
     sell_cost = pulp.lpSum(sell_vars[so.order_id] * so.quantity_mw * so.price_limit for so in sell_orders)
+    # welfare as calculated by demmand_utility - total cost
     prob += buy_utility - sell_cost
 
     baskets: dict[str, list[SellOrderInput]] = {}
@@ -220,6 +222,7 @@ def clear_auction(sell_orders: list[SellOrderInput], buy_orders: list[BuyOrderIn
         parents = [so for so in orders_in_basket if so.order_type == "PARENT"]
         if not parents:
             continue
+        # accept first parent sell order in basket
         basket_accepted[basket_id] = sell_vars[parents[0].order_id]
 
         children = [so for so in orders_in_basket if so.order_type == "CHILD"]
