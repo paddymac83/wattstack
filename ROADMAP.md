@@ -454,6 +454,36 @@ replica). Not yet done: running against live data, and the
 marginal-cost-vs-acceptance-probability sweep the original request
 named as the ultimate goal.
 
+**Full EAC fidelity: looping, buy-side substitutability, overholding,
+`docs/adr/0031`.** The user's own explicit choice: model all three
+deferred features now, before any live testing or backtesting sweeps.
+A real architectural consequence, not an incremental add -- looping
+and buy-side substitutability both require clearing multiple service
+windows *jointly*, so orders now carry explicit `window_start`/
+`window_end` rather than an implicit shared window, and
+`clear_auction()` solves across every window present in one combined
+MILP. Looped baskets (`looped_basket_id`, connected components via a
+small graph traversal, handling either a chain or star link
+representation) force equal acceptance across a family -- proven with
+two hand-constructed scenarios showing the constraint genuinely
+changes the outcome in both directions, not just that it doesn't
+crash: a basket that would clearly be accepted alone gets correctly
+forced to reject when its loop partner makes the combined welfare
+negative, and correctly stays accepted when the combined welfare is
+still positive. Buy-side substitutability mirrors the existing
+sell-side constraint directly. Overholding needed no special-cased
+acceptance logic -- `overholding_buy_order()` constructs the real
+design's own zero-price synthetic order, and welfare maximisation
+naturally only uses it when a negatively-priced sell order (explicitly
+allowed by the design) makes doing so beneficial, proven in both
+directions. Two real test-design flaws found and fixed while
+validating the new code (not the underlying formulation): a volume-
+equality test used an infeasible-by-construction scenario (a binary
+100MW order against 20MW demand), and an overholding test's own binary
+order made "use the headroom" genuinely correct rather than the bug it
+first looked like -- confirmed by hand-calculation before touching
+either test. 30 tests (up from 19), 354 total, no regressions.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -972,3 +1002,20 @@ Don't duplicate these here:
   19 new tests, 343 total. Looped baskets, buy-side substitutability,
   overholding, and exact transfer-aware pricing deliberately not
   modelled -- named directly, not implied solved.
+- `docs/adr/0031` -- full EAC fidelity: looped baskets, buy-side
+  substitutability, overholding, all three explicitly chosen by the
+  user before any live testing. Required orders to carry explicit
+  service windows (not an implicit shared one) so `clear_auction()`
+  could clear multiple windows jointly -- necessary for looping and
+  cross-window substitutability to mean anything. Looping proven with
+  two hand-built scenarios showing the constraint genuinely changes
+  outcomes in both directions (forces rejection when combined welfare
+  is negative, allows acceptance when still positive). Overholding
+  needed no special-cased logic -- a zero-priced synthetic buy order,
+  naturally used only when a negatively-priced sell order makes it
+  welfare-positive. Two real test-design flaws (not formulation bugs)
+  found and fixed: an infeasible-by-construction binary-order scenario,
+  and a binary order that made "use the overholding headroom" the
+  genuinely correct answer rather than the bug it first appeared to
+  be -- both confirmed by hand-calculation before correcting the
+  tests. 30 tests (up from 19), 354 total, no regressions.
