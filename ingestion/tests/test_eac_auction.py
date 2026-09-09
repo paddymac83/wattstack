@@ -170,7 +170,7 @@ def test_looped_baskets_forced_to_reject_together_when_combined_welfare_negative
 def test_looped_baskets_both_accepted_when_combined_welfare_positive():
     """The mirror case: B2 alone is only modestly profitable (+100 if
     it were unconstrained), well short of B1's own +950, but the
-    combined loop is still net positive (+1050), so both should clear
+    combined loop is still net positive when combined (+1050), so both should clear
     together."""
     sell_orders = [
         _sell("S1", "UNIT_A", "B1", "PARENT", "DCL", 10, 5.0, window=W1, looped_basket_id="B2"),
