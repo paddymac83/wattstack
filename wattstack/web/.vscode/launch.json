@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: Django tests (scenarios)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/manage.py",
+      "args": ["test", "scenarios", "-v", "2"],
+      "django": true,
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: Django dev server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/manage.py",
+      "args": ["runserver", "--noreload"],
+      "django": true,
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    }
+  ]
+}

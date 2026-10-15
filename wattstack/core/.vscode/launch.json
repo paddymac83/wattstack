@@ -1,0 +1,62 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: pytest (all core tests)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: pytest (current file)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-v"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: pytest (current file, keyword filter)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-v", "-k", "${input:testKeyword}"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: wattstack CLI (example scenario)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "wattstack_core.cli",
+      "args": ["run", "--config", "scenarios/example.yaml"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug: wattstack CLI (sweep)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "wattstack_core.cli",
+      "args": ["run", "--config", "scenarios/example.yaml", "--sweep"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testKeyword",
+      "type": "promptString",
+      "description": "pytest -k filter -- e.g. a test function name or substring of one"
+    }
+  ]
+}
