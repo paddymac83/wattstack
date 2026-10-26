@@ -484,6 +484,34 @@ order made "use the headroom" genuinely correct rather than the bug it
 first looked like -- confirmed by hand-calculation before touching
 either test. 30 tests (up from 19), 354 total, no regressions.
 
+**Cost Minimisation Pricing, non-negative-surplus rules and restricted/
+permissive overholding, `docs/adr/0032`.** Re-reading the design
+document (rather than citing it from memory) corrected earlier ADRs:
+there is no Section 5.3.1 (5.3 has an item 1, "at most one
+paradoxically accepted buy order", and an item 2, the permissive
+version); rules 7-8 live in Section 6.2; and v30 was never the
+"restricted" model it claimed -- with no link between buy acceptance
+and price, it behaved as an unbounded permissive one. Both versions are
+now explicit (`OverholdingMode`, default restricted). Stage 1 became
+price-aware without a bilinear relaxation: sell rules bound a window's
+price from below and non-paradoxical buyers bound it from above, so a
+supporting price exists iff the highest permitted price (a buyer's limit
+or the ceiling) satisfies every sell rule -- an exact MILP selection.
+Stage 2 is now real Cost Minimisation Pricing (an exact LP) with rules 7
+and 8 enforced for baskets and whole looped families, so a loss-making
+parent subsidised by its child clears at 6.0 where the old rule said
+10.0. An independent rule checker (`verify_clearing()`) guards every
+result. Found along the way: v30's `pulp` pin let a fresh install pick
+PuLP 4.x and break (fixed); residual price indeterminacy changes which
+buyers count as paradoxical; a vacuous-test guard caught an oracle
+generator on which the two modes never disagreed; and a general
+random-market stress run found a real Stage 2 bug (the restricted cap
+had to be enforced on the final prices, not just in Stage 1 -- the
+independent checker had raised rather than return a wrong answer; fixed,
+then 4,000 clears clean). 296 new tests (650 ingestion total), including
+an 80-seed brute-force oracle in both modes and a mutation check. Still open: a run on real order data under
+both modes, and the marginal-cost vs acceptance-probability sweep.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -1019,3 +1047,13 @@ Don't duplicate these here:
   genuinely correct answer rather than the bug it first appeared to
   be -- both confirmed by hand-calculation before correcting the
   tests. 30 tests (up from 19), 354 total, no regressions.
+- `docs/adr/0032` -- Cost Minimisation Pricing, rules 7-8 (non-negative
+  surplus for baskets and looped families) and restricted/permissive
+  overholding. Corrected earlier ADRs after re-reading the design
+  document: no Section 5.3.1 exists; v30 behaved as unbounded-permissive,
+  not restricted. Stage 1 price-aware via exact highest-permitted-price
+  selection (no McCormick relaxation); Stage 2 an exact LP; every result
+  re-checked by an independent `verify_clearing()`. Also fixed the
+  `pulp` pin that broke fresh installs, and a Stage 2 restricted-cap
+  bug found by stress test. 296 new tests, 650 ingestion total, no
+  regressions.

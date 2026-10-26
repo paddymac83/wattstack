@@ -141,3 +141,8 @@ before touching the full test suite.
   acceptance probability" backtesting loop the user's original request
   named as the ultimate goal -- this ADR covers the clearing engine
   itself, not yet the sweep built on top of it.
+
+## Update (ADR 0032)
+Stage 2 pricing is no longer the "max accepted limit" approximation:
+Cost Minimisation Pricing and rules 7-8 are implemented (ADR 0032).
+Rules 7-8 are in Section 6.2 of the design document, not Section 7.

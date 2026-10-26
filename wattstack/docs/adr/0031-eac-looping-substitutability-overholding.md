@@ -130,3 +130,14 @@ solving across all of them as one combined MILP.
   sweep the original request named as the ultimate goal. The user's
   own stated plan is to reach full EAC fidelity before attempting
   either -- this ADR is that fidelity work, not the sweep itself.
+
+## Update (ADR 0032)
+Three statements above were corrected by re-reading the design document:
+- It has no Section 5.3.1; "at most one paradoxically accepted buy order"
+  is Section 5.3 item 1, and the permissive version is item 2.
+- The claim that no special acceptance logic was needed for overholding
+  was wrong: nothing in this version capped paradoxical buy orders, so it
+  behaved as an unbounded permissive model, not the restricted one it
+  described. Both versions are now explicit (`OverholdingMode`).
+- The "not modelled" items (transfer-aware pricing, non-negative
+  surplus for baskets and looped families) are now implemented.
