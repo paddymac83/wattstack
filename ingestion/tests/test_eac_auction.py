@@ -2,6 +2,8 @@
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from wattstack_ingestion.eac_auction import (
     BuyOrderInput,
     ClearingResult,
@@ -444,3 +446,125 @@ def test_buy_orders_substitutability_family_none_when_blank(mock_get):
     provider = ResponseReserveOrdersProvider(client=NesoClient())
     result = provider.buy_orders([W1], "DCH")
     assert result[0].substitutability_family is None
+
+
+# ===========================================================================
+# Buy-side substitutability -- acceptance rules (Section 5.2, Appendix B)
+#
+# Run in isolation (from ingestion/):
+#     pytest tests -k buyfam -v                       # these AND the pricing ones
+#     pytest tests/test_eac_auction.py -k buyfam -v   # acceptance rules only
+#
+# The rule (p.14): "any combination of acceptance ratios between the
+# different buy orders of the same family can be chosen by the algorithm,
+# as long as the sum of the acceptance ratios of all orders in the same
+# family does not exceed 100%". It is a constraint on RATIOS, not MW, and
+# members may differ in volume, product and (overlapping) window.
+# ===========================================================================
+
+WB = (datetime(2026, 6, 15, 10, 0), datetime(2026, 6, 15, 14, 0))  # overlaps W1 (10:00-12:00 shared)
+
+
+def test_buyfam_only_one_equal_member_clears_and_the_higher_welfare_one_wins():
+    """Two 10MW buyers in one family, a seller for each product. Only one
+    family member can clear. DCH: 10 x 100 - 10 x 5 = 950; DCL: 10 x 80 -
+    10 x 5 = 750. So the DCH member clears, the DCL member and its seller
+    do not. (The older test only asserted 'sum <= 1', which a result that
+    rejects everything also satisfies.)"""
+    sells = [_sell("SH", "U1", "B1", "PARENT", "DCH", 10, 5.0), _sell("SL", "U2", "B2", "PARENT", "DCL", 10, 5.0)]
+    buys = [_buy("A", "DCH", 10, 100.0, family="F"), _buy("B", "DCL", 10, 80.0, family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 1.0, "B": 0.0}
+    assert r.acceptance_ratio_by_order_id == {"SH": 1.0, "SL": 0.0}
+    assert r.welfare == pytest.approx(950.0)
+
+
+# Appendix B.1 (p.31). Buyer book: order 1 = 600MW P1 @10; order 2 = 200MW P1
+# @5 (family 1); order 3 = 100MW P2 @12; order 4 = 100MW P2 @8; order 5 =
+# 200MW P2 @5 (family 1). The report lists four possible outcomes "depending
+# on available sell orders"; each is reproduced here by supplying exactly the
+# sell volume that forces it (non-curtailable parents, limit 4 -- below every
+# buyer, so no paradoxical acceptance is involved).
+_B1_OUTCOMES = [
+    # (P1 supply MW, P2 supply MW, expected ratios for orders 1..5, report's description)
+    (600, 400, [1.0, 0.00, 1.0, 1.0, 1.00], "600 P1 / 400 P2: 0% of order 2, 100% of order 5"),
+    (650, 350, [1.0, 0.25, 1.0, 1.0, 0.75], "650 P1 / 350 P2: 25% of order 2, 75% of order 5"),
+    (800, 200, [1.0, 1.00, 1.0, 1.0, 0.00], "800 P1 / 200 P2: 100% of order 2, 0% of order 5"),
+    (800, 100, [1.0, 1.00, 1.0, 0.0, 0.00], "800 P1 / 100 P2: order 4 rejected under scarcity"),
+]
+
+
+@pytest.mark.parametrize("p1_supply,p2_supply,expected,description", _B1_OUTCOMES, ids=[o[3][:12] for o in _B1_OUTCOMES])
+def test_buyfam_report_appendix_b1_outcomes(p1_supply, p2_supply, expected, description):
+    sells = [
+        _sell("SP1", "U1", "B1", "PARENT", "P1", p1_supply, 4.0),
+        _sell("SP2", "U2", "B2", "PARENT", "P2", p2_supply, 4.0),
+    ]
+    buys = [
+        _buy("1", "P1", 600, 10.0), _buy("2", "P1", 200, 5.0, family="1"),
+        _buy("3", "P2", 100, 12.0), _buy("4", "P2", 100, 8.0), _buy("5", "P2", 200, 5.0, family="1"),
+    ]
+    r = clear_auction(sells, buys)
+    got = [r.buy_acceptance_ratio_by_order_id[str(i)] for i in range(1, 6)]
+    assert got == pytest.approx(expected, abs=1e-4), description
+    assert r.buy_acceptance_ratio_by_order_id["2"] + r.buy_acceptance_ratio_by_order_id["5"] <= 1.0 + 1e-6
+
+
+def test_buyfam_constraint_is_on_ratios_so_unequal_volumes_split_by_ratio_not_mw():
+    """Report B.2 (p.32): "two orders belonging to the same family may
+    have different volumes". Family F: A = 10MW DCH, B = 20MW DCL, both
+    at 10. Sellers: 5MW DCH and 10MW DCL at 3. Both clear at ratio 0.5 each
+    (sum 1.0) -- 15MW in total, which a MW-based cap could not express.
+    Welfare 5 x 10 + 10 x 10 - 15 x 3 = 105."""
+    sells = [_sell("SH", "U1", "B1", "PARENT", "DCH", 5, 3.0), _sell("SL", "U2", "B2", "PARENT", "DCL", 10, 3.0)]
+    buys = [_buy("A", "DCH", 10, 10.0, family="F"), _buy("B", "DCL", 20, 10.0, family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == pytest.approx({"A": 0.5, "B": 0.5}, abs=1e-4)
+    assert r.acceptance_ratio_by_order_id == {"SH": 1.0, "SL": 1.0}
+    assert r.welfare == pytest.approx(105.0)
+
+
+def test_buyfam_unequal_volumes_full_acceptance_of_both_members_is_impossible():
+    """Same family, but sellers now cover BOTH members in full (10MW DCH,
+    20MW DCL). That would need ratios 1 + 1 = 2 > 1, so only the more
+    valuable member clears: DCL 20 x 10 - 20 x 3 = 140 beats DCH 10 x 10
+    - 10 x 3 = 70."""
+    sells = [_sell("SH", "U1", "B1", "PARENT", "DCH", 10, 3.0), _sell("SL", "U2", "B2", "PARENT", "DCL", 20, 3.0)]
+    buys = [_buy("A", "DCH", 10, 10.0, family="F"), _buy("B", "DCL", 20, 10.0, family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 0.0, "B": 1.0}
+    assert r.welfare == pytest.approx(140.0)
+
+
+def test_buyfam_separate_families_are_independent_of_each_other():
+    """Report B.2: two families constrain separately. F1 = {A (DCH, 100),
+    B (DCL, 90)}, F2 = {C (DCH, 80), D (DCL, 70)}, 10MW each. A 20MW DCH
+    seller needs A and C in full -- legal, one member from each family.
+    A 20MW DCL seller would need B and D (also one each) but the market
+    can only run one of the two sellers' products without exceeding a
+    family. DCH: 1000 + 800 - 20 x 5 = 1700 beats DCL: 900 + 700 - 20 x 5 = 1500."""
+    sells = [_sell("SH", "U1", "B1", "PARENT", "DCH", 20, 5.0), _sell("SL", "U2", "B2", "PARENT", "DCL", 20, 5.0)]
+    buys = [
+        _buy("A", "DCH", 10, 100.0, family="F1"), _buy("B", "DCL", 10, 90.0, family="F1"),
+        _buy("C", "DCH", 10, 80.0, family="F2"), _buy("D", "DCL", 10, 70.0, family="F2"),
+    ]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 1.0, "B": 0.0, "C": 1.0, "D": 0.0}
+    assert r.welfare == pytest.approx(1700.0)
+
+
+def test_buyfam_family_couples_members_across_overlapping_windows():
+    """Report B.3 (p.32): a family can span concomitant service windows.
+    A is in W1 (DCL, 100), B in WB (DCH, 60) -- windows share 10:00-12:00 --
+    with one 10MW seller each (different units, so no basket exclusivity).
+    Only one member clears: A, welfare 10 x 100 - 10 x 5 = 950; the WB
+    seller is rejected because its buyer would break the family."""
+    sells = [
+        _sell("S1", "U1", "B1", "PARENT", "DCL", 10, 5.0, window=W1),
+        _sell("S2", "U2", "B2", "PARENT", "DCH", 10, 5.0, window=WB),
+    ]
+    buys = [_buy("A", "DCL", 10, 100.0, window=W1, family="F"), _buy("B", "DCH", 10, 60.0, window=WB, family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 1.0, "B": 0.0}
+    assert r.acceptance_ratio_by_order_id == {"S1": 1.0, "S2": 0.0}
+    assert r.welfare == pytest.approx(950.0)

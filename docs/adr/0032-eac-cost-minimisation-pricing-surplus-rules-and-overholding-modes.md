@@ -238,3 +238,59 @@ also public, so a result (or a hand-built one) can be audited.
   auction behaves like; the document does not say.
 - Time Stage 1 on real order volumes before building any sweep on it.
 - Then the marginal-cost vs acceptance-probability sweep.
+
+## Addendum (2026-11-06): buy-side substitutability tests
+
+A review found buy families were under-tested: one acceptance test that
+asserted only `sum <= 1` (which a result rejecting everything also
+satisfies), one tamper test of the checker, and ~20% of members in the
+random markets. 20 tests were added, all named `test_buyfam_*`, after
+re-reading Sections 5.1/5.2 and Appendix B of the design report. What
+the report confirms (and the tests pin):
+
+- The constraint is on **acceptance ratios**, sum <= 1 (p.14, p.31) --
+  not on MW. Members may differ in volume, product and (overlapping)
+  window (B.1-B.3). Buy orders are fully curtailable; "Paradoxical
+  acceptance allowed" defaults to True (p.13).
+- Not modelled: the operator-configured maximum number of orders per
+  family (p.14 restriction 2), and no check that members in different
+  windows actually overlap in time (B.3). A family spanning disjoint
+  windows is accepted silently; real data presumably never does this.
+
+### Running them in isolation
+From `ingestion/` (virtualenv active):
+
+```
+pytest tests -k buyfam -v                        # all 20
+pytest tests/test_eac_auction.py -k buyfam -v    # 9 acceptance-rule tests
+pytest tests/test_eac_pricing.py -k buyfam -v    # 11 pricing-interaction tests
+pytest tests -k "buyfam and b1_outcomes" -v      # just the report's Appendix B.1 outcomes
+```
+
+| Test (`test_buyfam_...`) | File | Protects |
+|---|---|---|
+| `only_one_equal_member_clears_and_the_higher_welfare_one_wins` | auction | exactly one member clears, the higher-welfare one (welfare 950) |
+| `report_appendix_b1_outcomes` (x4) | auction | all four outcomes listed in Appendix B.1, incl. the 25%/75% split, by forcing each with exact sell supply |
+| `constraint_is_on_ratios_so_unequal_volumes_split_by_ratio_not_mw` | auction | 10MW + 20MW members at 0.5/0.5 (welfare 105); a MW cap cannot express this |
+| `unequal_volumes_full_acceptance_of_both_members_is_impossible` | auction | ratios 1 + 1 = 2 rejected; the 20MW member wins (140 vs 70) |
+| `separate_families_are_independent_of_each_other` | auction | one member from EACH of two families can clear (report B.2) |
+| `family_couples_members_across_overlapping_windows` | auction | report B.3: family spans windows |
+| `family_picks_the_product_with_higher_welfare_and_prices_only_that_window` (x2) | pricing | substitution + Cost Minimisation Pricing; idle window reports 0.0 |
+| `family_member_limit_price_does_not_move_the_clearing_price` (x2) | pricing | Section 7.1.2 for family members |
+| `family_blocks_the_two_paradoxical_buyer_trade_even_in_permissive_mode` (x2) | pricing | a family stops the 30MW trade that permissive mode otherwise accepts |
+| `control_the_same_trade_without_a_family_is_accepted_in_permissive_mode` | pricing | proves the family, not something else, did the blocking |
+| `restricted_mode_uses_the_higher_priced_family_member_as_its_one_paradoxical_buyer` | pricing | family x restricted overholding cap |
+| `paradox_flag_on_a_member_changes_which_member_the_family_uses` (x2) | pricing | family x "paradoxical acceptance allowed" flag (940 vs 930) |
+| `family_across_overlapping_windows_prices_only_the_winning_window` | pricing | B.3 with prices |
+
+Every expected number is hand-calculated in its docstring. (One was
+first mis-added by hand -- seller cost 20MW x 5 = 100, not 200 -- and the
+solver's value was right; the test was corrected, not the code.)
+
+### Mutation check
+Five deliberate breakages of the family handling were each caught, by
+the tests aimed at them: constraint removed (10 tests fail), cap in MW
+instead of ratio (5), family applied only within one window (2), only
+within one product (9), all families merged into one (1). The paradox-flag
+and restricted-slot tests guard different code and were covered by the
+earlier mutation runs (above), not by these five.

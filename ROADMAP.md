@@ -1056,4 +1056,5 @@ Don't duplicate these here:
   re-checked by an independent `verify_clearing()`. Also fixed the
   `pulp` pin that broke fresh installs, and a Stage 2 restricted-cap
   bug found by stress test. 296 new tests, 650 ingestion total, no
-  regressions.
+  regressions. Addendum: 20 `test_buyfam_*` buy-side substitutability
+  tests (670 total), runnable alone with `pytest tests -k buyfam`.

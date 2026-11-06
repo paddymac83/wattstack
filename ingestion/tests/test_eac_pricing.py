@@ -980,3 +980,148 @@ def test_every_result_on_general_random_markets_passes_the_independent_checker(s
         assert verify_clearing(sells, buys, result, overholding_mode=mode) == [], f"seed {seed} {mode.value}"
         welfare[mode] = result.welfare
     assert welfare[PERMISSIVE] >= welfare[RESTRICTED] - 1e-6
+
+
+# ===========================================================================
+# Buy-side substitutability x pricing (Section 5.2, Appendix B)
+#
+# Run in isolation (from ingestion/):
+#     pytest tests/test_eac_pricing.py -k buyfam -v   # these only
+#     pytest tests -k buyfam -v                       # plus the acceptance-rule ones
+#
+# The family constraint (sum of acceptance ratios <= 1) decides WHICH buy
+# orders clear; these tests check that the choice is consistent with Cost
+# Minimisation Pricing, the paradoxical-acceptance flag and the overholding
+# cap. Acceptance-rule tests (report Appendix B outcomes) live in
+# test_eac_auction.py under the same -k buyfam selector.
+# ===========================================================================
+
+K_DCH = ("DCH", W1[0], W1[1])
+W_B = (datetime(2026, 6, 15, 10, 0), datetime(2026, 6, 15, 14, 0))  # shares 10:00-12:00 with W1 (report B.3)
+K_DCH_WB = ("DCH", W_B[0], W_B[1])
+
+
+@pytest.mark.parametrize(
+    "dcl_limit, winner, loser, price_key, idle_key, price",
+    [
+        (5.0, "B", "A", K1, K_DCH, 5.0),    # DCL: 200 - 50 = 150 beats DCH: 200 - 80 = 120
+        (15.0, "A", "B", K_DCH, K1, 8.0),   # DCL: 200 - 150 = 50 loses to DCH: 120
+    ],
+    ids=["dcl-cheaper-wins", "dch-wins-when-dcl-seller-is-dear"],
+)
+def test_buyfam_family_picks_the_product_with_higher_welfare_and_prices_only_that_window(
+    dcl_limit, winner, loser, price_key, idle_key, price
+):
+    """Family F = {A: 10MW DCH at 20, B: 10MW DCL at 20}; sellers: DCH 10MW
+    at 8, DCL 10MW at `dcl_limit`. Exactly one member clears -- the product
+    whose seller leaves more welfare. The winning window clears at its
+    seller's limit (lowest feasible price); the idle window has no accepted
+    volume and reports 0.0."""
+    sells = [_parent("SH", "U1", 10, 8.0, product="DCH"), _parent("SL", "U2", 10, dcl_limit, product="DCL")]
+    buys = [_buy("A", 10, 20.0, product="DCH", family="F"), _buy("B", 10, 20.0, product="DCL", family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id[winner] == 1.0
+    assert r.buy_acceptance_ratio_by_order_id[loser] == 0.0
+    assert r.clearing_price_by_product_window[price_key] == pytest.approx(price)
+    assert r.clearing_price_by_product_window[idle_key] == 0.0
+    assert verify_clearing(sells, buys, r) == []
+
+
+@pytest.mark.parametrize("member_price", [20.0, 100.0])
+def test_buyfam_family_member_limit_price_does_not_move_the_clearing_price(member_price):
+    """Section 7.1.2: buy limit prices never set the price -- including
+    those of family members. The winning DCL member bids 20 or 100; the
+    price is the seller's limit, 5, either way."""
+    sells = [_parent("SH", "U1", 10, 8.0, product="DCH"), _parent("SL", "U2", 10, 5.0, product="DCL")]
+    buys = [_buy("A", 10, 20.0, product="DCH", family="F"), _buy("B", 10, member_price, product="DCL", family="F")]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id["B"] == 1.0
+    assert r.clearing_price_by_product_window[K1] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("mode", [RESTRICTED, PERMISSIVE])
+def test_buyfam_family_blocks_the_two_paradoxical_buyer_trade_even_in_permissive_mode(mode):
+    """30MW non-curtailable at limit 3; buyers B1 10 at 10, and B2 (10 at
+    2) and B3 (10 at 1) sharing family F. Without the family the permissive
+    mode accepts this trade (welfare +40, see the overholding tests). With
+    the family, B2 + B3 can supply at most ONE order's worth (10MW): 10 + 10
+    = 20 < 30MW, so no mode can take it."""
+    sells = [_parent("S", "U", 30, 3.0)]
+    buys = [_buy("B1", 10, 10.0), _buy("B2", 10, 2.0, family="F"), _buy("B3", 10, 1.0, family="F")]
+    r = clear_auction(sells, buys, overholding_mode=mode)
+    assert r.acceptance_ratio_by_order_id["S"] == 0.0
+    assert r.welfare == 0.0
+
+
+def test_buyfam_control_the_same_trade_without_a_family_is_accepted_in_permissive_mode():
+    """Pins that the family -- not something else -- blocked the trade above."""
+    sells = [_parent("S", "U", 30, 3.0)]
+    buys = [_buy("B1", 10, 10.0), _buy("B2", 10, 2.0), _buy("B3", 10, 1.0)]
+    r = clear_auction(sells, buys, overholding_mode=PERMISSIVE)
+    assert r.acceptance_ratio_by_order_id["S"] == 1.0
+    assert r.welfare == pytest.approx(40.0)
+
+
+def test_buyfam_restricted_mode_uses_the_higher_priced_family_member_as_its_one_paradoxical_buyer():
+    """20MW at limit 3; buyer A 10 at 10; family F = {B: 10 at 2, C: 10 at
+    1}. The 10MW shortfall must come from one family member, paradoxically
+    (price 3 exceeds both limits) -- the single paradoxical slot the
+    RESTRICTED cap allows. B pays more, so B is used: welfare 100 + 20 - 60
+    = 60."""
+    sells = [_parent("S", "U", 20, 3.0)]
+    buys = [_buy("A", 10, 10.0), _buy("B", 10, 2.0, family="F"), _buy("C", 10, 1.0, family="F")]
+    r = clear_auction(sells, buys, overholding_mode=RESTRICTED)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 1.0, "B": 1.0, "C": 0.0}
+    assert r.paradoxically_accepted_buy_order_ids == ["B"]
+    assert _price(r) == pytest.approx(3.0)
+    assert r.welfare == pytest.approx(60.0)
+
+
+@pytest.mark.parametrize(
+    "b_allows_paradox, expected_member, expected_welfare",
+    [(True, "B", 940.0), (False, "C", 930.0)],
+    ids=["both-allowed-B-wins", "B-forbids-paradox-C-used"],
+)
+def test_buyfam_paradox_flag_on_a_member_changes_which_member_the_family_uses(
+    b_allows_paradox, expected_member, expected_welfare
+):
+    """20MW non-curtailable at limit 5; buyer D 10 at 100 (no family);
+    family F = {B: 10 at 4, C: 10 at 3}. The price must be >= 5, above both
+    members' limits, so whichever member is used is paradoxically accepted.
+    If B allows that it wins on price (welfare 1000 + 40 - 100 = 940). If B
+    forbids it, B is unusable and C -- which allows it -- is used even
+    though it pays less (1000 + 30 - 100 = 930)."""
+    sells = [_parent("S", "U", 20, 5.0)]
+    buys = [
+        _buy("D", 10, 100.0),
+        _buy("B", 10, 4.0, family="F", paradox_ok=b_allows_paradox),
+        _buy("C", 10, 3.0, family="F"),
+    ]
+    r = clear_auction(sells, buys, overholding_mode=RESTRICTED)
+    assert r.buy_acceptance_ratio_by_order_id[expected_member] == 1.0
+    other = "C" if expected_member == "B" else "B"
+    assert r.buy_acceptance_ratio_by_order_id[other] == 0.0
+    assert r.paradoxically_accepted_buy_order_ids == [expected_member]
+    assert _price(r) == pytest.approx(5.0)
+    assert r.welfare == pytest.approx(expected_welfare)
+    assert verify_clearing(sells, buys, r) == []
+
+
+def test_buyfam_family_across_overlapping_windows_prices_only_the_winning_window():
+    """Report B.3: family F = {A: DCL in W1 at 100, B: DCH in a window that
+    overlaps W1 at 60}; sellers 10MW each, limits 5 (W1) and 7 (other),
+    different units. A wins (1000 - 50 = 950 vs 600 - 70 = 530). W1 clears at
+    5; the other window has no accepted volume and reports 0.0."""
+    sells = [
+        _parent("S1", "U1", 10, 5.0, product="DCL", window=W1),
+        _parent("S2", "U2", 10, 7.0, product="DCH", window=W_B),
+    ]
+    buys = [
+        _buy("A", 10, 100.0, product="DCL", window=W1, family="F"),
+        _buy("B", 10, 60.0, product="DCH", window=W_B, family="F"),
+    ]
+    r = clear_auction(sells, buys)
+    assert r.buy_acceptance_ratio_by_order_id == {"A": 1.0, "B": 0.0}
+    assert r.clearing_price_by_product_window[K1] == pytest.approx(5.0)
+    assert r.clearing_price_by_product_window[K_DCH_WB] == 0.0
+    assert r.welfare == pytest.approx(950.0)
