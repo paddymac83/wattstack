@@ -59,7 +59,7 @@ intentionally local-only).
 
 Creates all three packages' virtualenvs, installs `web`'s dependency on
 `core` as an editable local path, runs migrations, and runs all three
-test suites (54 core tests + 6 web tests + 670 ingestion tests). Safe to re-run.
+test suites (54 core tests + 6 web tests + 852 ingestion tests). Safe to re-run.
 
 ### CLI, by hand
 
@@ -79,7 +79,7 @@ wattstack run --config scenarios/example.yaml --sweep
 cd ingestion
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest -v                                    # 670 tests, all mocked -- no network needed
+pytest -v                                    # 852 tests, all mocked -- no network needed
 
 wattstack-explore --verify-only              # confirm both APIs still match what's documented
 wattstack-explore --days 14                  # writes charts to reports/
@@ -92,6 +92,19 @@ marimo edit notebooks/demand_forecast_vs_system_tightness.py        # Phase B: d
 marimo edit notebooks/dc_requirements_by_efa_block.py               # DC requirement by EFA block, inertia, and largest secured loss
 marimo edit notebooks/imbalance_price_probabilistic_forecast.py     # Probabilistic day-ahead System Price forecast, backtested
 ```
+
+### Backtesting the EAC clearing against NESO's published auctions
+
+```
+cd ingestion && . .venv/bin/activate
+wattstack-eac-history synth   --out /tmp/synth --day 2026-05-07          # synthetic day, all 12 products, no network
+wattstack-eac-history inspect --data /tmp/synth --day 2026-05-07          # validate + census, no solving
+wattstack-eac-history run     --data /tmp/synth --day 2026-05-07 --out /tmp/out --mode both
+wattstack-eac-history download --start 2026-05-07 --out data/2026-05-07   # real data (needs api.neso.energy)
+```
+
+Full runbook, how to read the report, and what is not modelled:
+`docs/eac-history-backtest.md` (ADR 0033).
 
 ### Web UI, by hand
 

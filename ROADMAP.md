@@ -512,6 +512,22 @@ then 4,000 clears clean). 296 new tests (650 ingestion total), including
 an 80-seed brute-force oracle in both modes and a mutation check. Still open: a run on real order data under
 both modes, and the marginal-cost vs acceptance-probability sweep.
 
+**EAC historical backtest pipeline (ADR 0033) -- built, awaiting its first
+real-data run.** `wattstack-eac-history` ingests NESO's new-format sell
+orders, buy orders, results summary and results by unit (from 6 May 2026),
+clears a day's auctions across all 12 products jointly, and compares with the
+published outcome through four lenses: the data against itself, the real
+outcome against wattstack's rules, welfare, and per-window prices/volumes.
+Found on the way: Slow Reserve Flexible Groups and linked service windows
+exist in the data but not in the engine (counted and scored separately, not
+hidden); a welfare-rounding artefact in the comparison (fixed); and a wrong
+performance hypothesis (rule 6's encoding was not the bottleneck; tried,
+measured, reverted). The engine gained an exact decomposition into
+independent sub-markets and solver time/gap limits. 182 new tests (852
+ingestion total) and a 24-mutation check. Not yet established: anything about
+real data -- the sandbox cannot reach api.neso.energy, so the first real run
+is the user's.
+
 ### Phase A -- market model correction (core, no new dependencies)
 
 **Done -- see `docs/adr/0008`.** Core (`core: 26 tests`, `web: 6
@@ -1058,3 +1074,8 @@ Don't duplicate these here:
   bug found by stress test. 296 new tests, 650 ingestion total, no
   regressions. Addendum: 20 `test_buyfam_*` buy-side substitutability
   tests (670 total), runnable alone with `pytest tests -k buyfam`.
+- `docs/adr/0033` -- historical EAC backtest pipeline: strict ingestion of
+  the four NESO order/result datasets, all-12-product day runner, four-lens
+  comparison with the published outcome, exact sub-market decomposition,
+  solver limits. Built and tested on synthetic data in the real schema;
+  not yet run on real data. 182 new tests, 852 ingestion total.

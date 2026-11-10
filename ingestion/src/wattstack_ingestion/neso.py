@@ -132,6 +132,15 @@ KNOWN_RESOURCES = {
     # work this way (see module docstring).
     "response_reserve_buy_orders": "e638cf3d-bed1-42ae-a984-8fe3c556febf",
     "response_reserve_sell_orders": "8ba48f26-d73e-4094-a90d-ba075eb739c1",
+    # NEW-FORMAT order datasets (results published in this format from
+    # 6 May 2026), IDs read from their data-portal pages in November
+    # 2026: neso_response-reserve_sell_orders / ..._buy_orders. These
+    # carry the outcome per order (acceptanceRatio, status,
+    # executedQuantity, clearingPrice, reasonRejected), which is what
+    # lets eac_history compare a simulated clearing with the real one.
+    # They are DIFFERENT resources from the "daily" order datasets above.
+    "eac_sell_orders": "13b511df-d6ec-4143-afb1-0ecc6fd19810",
+    "eac_buy_orders": "1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5",
     # Historical only, does not update -- the sole source for anything
     # before November 2023 (the old Dynamic Containment-only tenders).
     "dc_dr_dm_summary_2021_2023": "888e5029-f786-41d2-bc15-cbfd1d285e96",
@@ -172,6 +181,30 @@ class NesoClient:
             raise RuntimeError(f"NESO datastore_search reported failure: {payload}")
         records = payload["result"]["records"]
 
+        if self.cache is not None:
+            self.cache.set(cache_key, records)
+        return records
+
+    def datastore_search_sql(self, sql: str) -> list[dict]:
+        """CKAN `datastore_search_sql`: a read-only SQL SELECT against
+        resource tables, each addressed by its resource id in double
+        quotes (`SELECT * FROM "<resource id>" WHERE ...`). Column names
+        are camelCase, so they must be double-quoted too. Used for
+        date-range and auctionID-list pulls that plain datastore_search
+        (equality filters only) cannot express. Not exercised against the
+        live API from the development sandbox, which cannot reach
+        api.neso.energy -- see ADR 0033."""
+        cache_key = f"neso:datastore_search_sql:{sql}"
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+        response = requests.get(f"{BASE_URL}/datastore_search_sql", params={"sql": sql}, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("success"):
+            raise RuntimeError(f"NESO datastore_search_sql reported failure: {payload}")
+        records = payload["result"]["records"]
         if self.cache is not None:
             self.cache.set(cache_key, records)
         return records

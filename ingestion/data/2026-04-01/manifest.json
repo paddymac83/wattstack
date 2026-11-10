@@ -1,0 +1,25 @@
+{
+  "fetched_at_utc": "2026-11-10T11:44:00+00:00",
+  "start_day": "2026-04-01",
+  "end_day": "2026-04-01",
+  "day_basis": "efa",
+  "delivery_window_utc": [
+    "2026-03-31T22:00:00",
+    "2026-04-01T22:00:00"
+  ],
+  "auction_ids": [
+    2661
+  ],
+  "rows": {
+    "results_summary": 324,
+    "sell_orders": 0,
+    "buy_orders": 735,
+    "results_by_unit": 6764
+  },
+  "resources": {
+    "sell_orders": "13b511df-d6ec-4143-afb1-0ecc6fd19810",
+    "buy_orders": "1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5",
+    "results_summary": "596f29ac-0387-4ba4-a6d3-95c243140707",
+    "results_by_unit": "a63ab354-7e68-44c2-ad96-c6f920c30e85"
+  }
+}

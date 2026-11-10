@@ -72,6 +72,14 @@ STAGE 2 -- Cost Minimisation Pricing (Section 7, 7.1.1, 7.2):
   independent rule checker before it is returned; a violation raises
   `PricingInfeasibleError` rather than returning a wrong answer.
 
+For a whole historical day use `clear_auction_by_component()`: it splits
+the orders into the connected components of the constraint graph (basket,
+loop, same unit on overlapping windows, same product-window, buy family)
+and solves each as its own MILP with the global price bounds fixed --
+identical welfare to the joint solve (tested), far smaller models.
+`clear_auction(time_limit_s=, mip_gap=)` bounds the solver; a time-limited
+result is still rule-checked and carries `optimality_proven=False`.
+
 What is deliberately NOT modelled, named directly:
   - Parent -> child surplus transfers, and surplus transfers inside a
     buy substitutability family: the document's glossary mentions the
@@ -97,6 +105,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+import time
 from enum import Enum
 
 import pulp
@@ -201,6 +210,13 @@ class ClearingResult:
     procurement_cost: float = 0.0
     overholding_mode: OverholdingMode = OverholdingMode.RESTRICTED
     price_bounds: tuple[float, float] | None = None
+    # False only when a solver time limit stopped the search at a
+    # feasible but unproven solution (see `clear_auction(time_limit_s=)`).
+    # Welfare is then a lower bound on the optimum, and every rule
+    # still holds -- the independent checker runs regardless.
+    optimality_proven: bool = True
+    solve_seconds: float = 0.0
+    n_subproblems: int = 1
 
     @property
     def hypothetical_bid_accepted(self) -> bool:
@@ -498,6 +514,8 @@ def clear_auction(
     *,
     overholding_mode: OverholdingMode = OverholdingMode.RESTRICTED,
     price_bounds: tuple[float, float] | None = None,
+    time_limit_s: float | None = None,
+    mip_gap: float | None = None,
 ) -> ClearingResult:
     """Clears every window present in the orders jointly: Stage 1
     (price-aware acceptance MILP) then Stage 2 (Cost Minimisation
@@ -509,6 +527,15 @@ def clear_auction(
     Earlier versions (ADR 0030/0031) had no cap at all and behaved as
     an unbounded permissive model while documenting themselves as
     restricted; PERMISSIVE now reproduces "no cap" deliberately.
+
+    `time_limit_s` / `mip_gap` are passed to CBC (seconds, relative
+    gap). Both default to None = solve to proven optimality, the
+    behaviour of every earlier version. When the limit stops the search
+    at a feasible solution the result is still rule-checked and
+    returned, with `optimality_proven=False`; if no feasible solution
+    was found a RuntimeError is raised. For a large market prefer
+    `clear_auction_by_component()`, which gives identical results by
+    solving independent sub-markets separately.
 
     Mutual exclusivity is scoped to a single unit's own baskets on
     OVERLAPPING windows, not market-wide -- confirmed from the design
@@ -682,9 +709,19 @@ def clear_auction(
         for flags in paradox_flags.values():
             prob += pulp.lpSum(flags) <= 1
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    solver_kwargs: dict = {"msg": 0}
+    if time_limit_s is not None:
+        solver_kwargs["timeLimit"] = time_limit_s
+    if mip_gap is not None:
+        solver_kwargs["gapRel"] = mip_gap
+    started = time.perf_counter()
+    prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
+    solve_seconds = time.perf_counter() - started
     if pulp.LpStatus[prob.status] != "Optimal":
         raise RuntimeError(f"EAC clearing MILP did not find an optimal solution: {pulp.LpStatus[prob.status]}")
+    # PuLP reports status "Optimal" for a time-limited feasible stop too;
+    # sol_status tells the two apart.
+    optimality_proven = prob.sol_status == pulp.LpSolutionOptimal
 
     x_val = {so.order_id: _clean(pulp.value(x[so.order_id])) for so in sell_orders}
     y_val = {bo.order_id: _clean(pulp.value(y[bo.order_id])) for bo in buy_orders}
@@ -695,9 +732,12 @@ def clear_auction(
     if violations:
         raise PricingInfeasibleError("clearing result failed its own rule check: " + "; ".join(violations))
 
-    return _assemble_result(
+    result = _assemble_result(
         sell_orders, buy_orders, struct, x_val, y_val, prices, overholding_mode, (lo, hi)
     )
+    result.optimality_proven = optimality_proven
+    result.solve_seconds = solve_seconds
+    return result
 
 
 def _price_stage(
@@ -848,6 +888,110 @@ def _assemble_result(
 
 
 # ---------------------------------------------------------------------------
+# Exact decomposition into independent sub-markets
+# ---------------------------------------------------------------------------
+
+
+def _components(sell_orders: list[SellOrderInput], buy_orders: list[BuyOrderInput]) -> list[tuple[list, list]]:
+    """Connected components of the constraint graph. Two orders are
+    linked when some constraint can couple their acceptance: same
+    basket (rules 3/4), looped baskets (rule 5), same unit on
+    overlapping windows (rule 6), same (product, window) (volume
+    balance, price layer, overholding cap) or same buy family. Nothing
+    else couples orders -- the price bounds are global but fixed -- so
+    the components are exactly independent."""
+    parent_of: dict[tuple, tuple] = {}
+
+    def find(a):
+        parent_of.setdefault(a, a)
+        while parent_of[a] != a:
+            parent_of[a] = parent_of[parent_of[a]]
+            a = parent_of[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent_of[ra] = rb
+
+    parents_by_unit: dict[str, list[SellOrderInput]] = defaultdict(list)
+    for so in sell_orders:
+        union(("basket", so.basket_id), ("key", _sell_key(so)))
+        if so.looped_basket_id:
+            union(("basket", so.basket_id), ("basket", so.looped_basket_id))
+        if so.order_type == "PARENT":
+            parents_by_unit[so.auction_unit].append(so)
+    for unit_parents in parents_by_unit.values():
+        for i in range(len(unit_parents)):
+            for j in range(i + 1, len(unit_parents)):
+                p1, p2 = unit_parents[i], unit_parents[j]
+                if _windows_overlap(p1.window_start, p1.window_end, p2.window_start, p2.window_end):
+                    union(("basket", p1.basket_id), ("basket", p2.basket_id))
+    family_anchor: dict[str, tuple] = {}
+    for bo in buy_orders:
+        union(("buy", bo.order_id), ("key", _buy_key(bo)))
+        if bo.substitutability_family:
+            union(("buy", bo.order_id), family_anchor.setdefault(bo.substitutability_family, ("buy", bo.order_id)))
+
+    groups: dict[tuple, tuple[list, list]] = {}
+    for so in sell_orders:
+        groups.setdefault(find(("basket", so.basket_id)), ([], []))[0].append(so)
+    for bo in buy_orders:
+        groups.setdefault(find(("buy", bo.order_id)), ([], []))[1].append(bo)
+    return list(groups.values())
+
+
+def clear_auction_by_component(
+    sell_orders: list[SellOrderInput],
+    buy_orders: list[BuyOrderInput],
+    *,
+    overholding_mode: OverholdingMode = OverholdingMode.RESTRICTED,
+    price_bounds: tuple[float, float] | None = None,
+    time_limit_s: float | None = None,
+    mip_gap: float | None = None,
+) -> ClearingResult:
+    """Same result as `clear_auction()` -- same welfare, same rules,
+    same checker -- but solved as one MILP per independent sub-market
+    (see `_components`). The global price bounds are resolved once and
+    handed to every sub-problem, so no bound differs from the joint
+    solve. Welfare ties between sub-markets cannot arise (they share no
+    constraint). `time_limit_s` applies to EACH sub-problem;
+    `optimality_proven` is False if any of them hit it."""
+    overholding_mode = OverholdingMode(overholding_mode)
+    _build_structure(sell_orders)  # global validation (duplicate IDs, orphan children)
+    _validate_buy_orders(buy_orders)
+    lo, hi = _resolve_bounds(sell_orders, buy_orders, price_bounds)
+    parts = _components(sell_orders, buy_orders)
+    if not parts:
+        return ClearingResult(
+            acceptance_ratio_by_order_id={}, clearing_price_by_product_window={},
+            overholding_mode=overholding_mode, price_bounds=(lo, hi), n_subproblems=0,
+        )
+    merged = ClearingResult(
+        acceptance_ratio_by_order_id={}, clearing_price_by_product_window={},
+        overholding_mode=overholding_mode, price_bounds=(lo, hi), n_subproblems=len(parts),
+    )
+    for part_sells, part_buys in parts:
+        r = clear_auction(
+            part_sells, part_buys, overholding_mode=overholding_mode, price_bounds=(lo, hi),
+            time_limit_s=time_limit_s, mip_gap=mip_gap,
+        )
+        merged.acceptance_ratio_by_order_id.update(r.acceptance_ratio_by_order_id)
+        merged.clearing_price_by_product_window.update(r.clearing_price_by_product_window)
+        merged.buy_acceptance_ratio_by_order_id.update(r.buy_acceptance_ratio_by_order_id)
+        merged.paradoxically_accepted_buy_order_ids.extend(r.paradoxically_accepted_buy_order_ids)
+        merged.paradoxical_buy_volume_mw_by_product_window.update(r.paradoxical_buy_volume_mw_by_product_window)
+        merged.individual_surplus_by_order_id.update(r.individual_surplus_by_order_id)
+        merged.basket_surplus_by_basket_id.update(r.basket_surplus_by_basket_id)
+        merged.looped_family_surplus.update(r.looped_family_surplus)
+        merged.welfare += r.welfare
+        merged.procurement_cost += r.procurement_cost
+        merged.solve_seconds += r.solve_seconds
+        merged.optimality_proven = merged.optimality_proven and r.optimality_proven
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Independent rule checker
 # ---------------------------------------------------------------------------
 
@@ -896,15 +1040,16 @@ def _find_violations(
         if max(ratios) - min(ratios) > tol:
             out.append(f"rule 5: looped baskets {family} have unequal acceptance {ratios}")
 
-    parents = list(struct.parent.values())  # rule 6
-    for i in range(len(parents)):
-        for j in range(i + 1, len(parents)):
-            p1, p2 = parents[i], parents[j]
-            if p1.auction_unit == p2.auction_unit and _windows_overlap(
-                p1.window_start, p1.window_end, p2.window_start, p2.window_end
-            ):
-                if x[p1.order_id] + x[p2.order_id] > 1 + tol:
-                    out.append(f"rule 6: unit {p1.auction_unit} accepted both {p1.basket_id} and {p2.basket_id}")
+    parents_by_unit: dict[str, list[SellOrderInput]] = defaultdict(list)  # rule 6
+    for p in struct.parent.values():
+        parents_by_unit[p.auction_unit].append(p)
+    for unit_parents in parents_by_unit.values():
+        for i in range(len(unit_parents)):
+            for j in range(i + 1, len(unit_parents)):
+                p1, p2 = unit_parents[i], unit_parents[j]
+                if _windows_overlap(p1.window_start, p1.window_end, p2.window_start, p2.window_end):
+                    if x[p1.order_id] + x[p2.order_id] > 1 + tol:
+                        out.append(f"rule 6: unit {p1.auction_unit} accepted both {p1.basket_id} and {p2.basket_id}")
 
     buy_families: dict[str, float] = defaultdict(float)
     for bo in buy_orders:
@@ -914,10 +1059,16 @@ def _find_violations(
         if total > 1 + tol:
             out.append(f"buy family {family_id} sums to {total}")
 
-    keys = {_sell_key(so) for so in sell_orders} | {_buy_key(bo) for bo in buy_orders}
+    sell_volume_by_key: dict[Key, float] = defaultdict(float)
+    buy_volume_by_key: dict[Key, float] = defaultdict(float)
+    for so in sell_orders:
+        sell_volume_by_key[_sell_key(so)] += so.quantity_mw * x[so.order_id]
+    for bo in buy_orders:
+        buy_volume_by_key[_buy_key(bo)] += bo.quantity_mw * y[bo.order_id]
+    keys = set(sell_volume_by_key) | set(buy_volume_by_key)
     for k in keys:  # volume balance
-        sell_volume = sum(so.quantity_mw * x[so.order_id] for so in sell_orders if _sell_key(so) == k)
-        buy_volume = sum(bo.quantity_mw * y[bo.order_id] for bo in buy_orders if _buy_key(bo) == k)
+        sell_volume = sell_volume_by_key.get(k, 0.0)
+        buy_volume = buy_volume_by_key.get(k, 0.0)
         if abs(sell_volume - buy_volume) > tol * (1.0 + max(sell_volume, buy_volume)):
             out.append(f"volume balance {k[0]}: sell {sell_volume} != buy {buy_volume}")
         price = prices.get(k, 0.0)

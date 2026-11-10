@@ -17,6 +17,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 wattstack-explore = "wattstack_ingestion.cli:main"
+wattstack-eac-history = "wattstack_ingestion.eac_history_cli:main"
 
 [build-system]
 requires = ["hatchling"]

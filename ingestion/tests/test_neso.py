@@ -194,3 +194,27 @@ def test_verify_system_inertia_schema_raises_clearly_when_no_records(mock_get):
     mock_get.return_value = _mock_response({"success": True, "result": {"records": []}})
     with pytest.raises(RuntimeError, match="zero records"):
         NesoClient().verify_system_inertia_schema("some-resource-id")
+
+
+@patch("wattstack_ingestion.neso.requests.get")
+def test_datastore_search_sql_sends_the_statement_and_returns_records(mock_get):
+    mock_get.return_value = _mock_response({"success": True, "result": {"records": [SAMPLE_ROW]}})
+    sql = 'SELECT * FROM "abc" LIMIT 1'
+    rows = NesoClient().datastore_search_sql(sql)
+    assert rows == [SAMPLE_ROW]
+    assert mock_get.call_args.args[0].endswith("/datastore_search_sql")
+    assert mock_get.call_args.kwargs["params"] == {"sql": sql}
+
+
+@patch("wattstack_ingestion.neso.requests.get")
+def test_datastore_search_sql_raises_on_reported_failure(mock_get):
+    mock_get.return_value = _mock_response({"success": False, "error": "bad sql"})
+    with pytest.raises(RuntimeError, match="datastore_search_sql reported failure"):
+        NesoClient().datastore_search_sql("SELECT 1")
+
+
+def test_new_format_order_resources_are_registered():
+    assert KNOWN_RESOURCES["eac_sell_orders"] == "13b511df-d6ec-4143-afb1-0ecc6fd19810"
+    assert KNOWN_RESOURCES["eac_buy_orders"] == "1cf68f59-8eb8-4f1d-bccf-11b5a47b24e5"
+    # the legacy "daily" order resources must remain distinct and untouched
+    assert KNOWN_RESOURCES["response_reserve_sell_orders"] != KNOWN_RESOURCES["eac_sell_orders"]
